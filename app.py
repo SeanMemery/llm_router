@@ -25,7 +25,6 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel, Field, ValidationError
 
-from dashboard.jobs import ROUTER_WAIT_PAUSE_REASON, DashboardJobManager, DashboardJobSnapshot
 from dashboard.llm_router import (
     DashboardLLMRouter,
     LLMRouterConnectionConfig,
@@ -62,11 +61,6 @@ ROUTER_WORKER_HEARTBEAT_TIMEOUT_SECONDS = max(
     30.0,
     float(os.getenv("ROUTER_WORKER_HEARTBEAT_TIMEOUT_SECONDS", "180")),
 )
-ROUTER_DEPENDENT_JOB_ACTIONS = {
-    "supervised-learn-and-evaluate",
-    "unsupervised-launch",
-    "evaluate-deepphy",
-}
 ROUTER_PUBLIC_FUNNEL_PORT = 8443
 ROUTER_PUBLIC_FUNNEL_PATH = "/public"
 ROUTER_PUBLIC_API_PATH = f"{ROUTER_PUBLIC_FUNNEL_PATH}/v1"
@@ -491,14 +485,6 @@ def _reconcile_modal_worker_launches(
     for launch_id in pruned_launch_ids:
         _prune_modal_worker_launch_files(layout, launch_id)
     return sorted(updated, key=lambda item: item.started_at, reverse=True)
-
-
-def _job_depends_on_router(snapshot: DashboardJobSnapshot) -> bool:
-    if snapshot.status not in {"queued", "running"}:
-        return False
-    if not snapshot.metadata.get("supports_pause", False):
-        return False
-    return snapshot.metadata.get("action") in ROUTER_DEPENDENT_JOB_ACTIONS
 
 
 def _redirect_with_error(next_url: str, message: str) -> RedirectResponse:
@@ -1446,7 +1432,6 @@ def create_router_app(*, layout: ArtifactLayout | None = None) -> FastAPI:
         detail_dir=_router_request_detail_dir(resolved_layout),
         max_entries=ROUTER_REQUEST_LOG_MAX_ENTRIES,
     )
-    dashboard_job_manager = DashboardJobManager(layout=resolved_layout)
     router_snapshot = load_llm_router_snapshot(resolved_layout)
     worker_registry = LLMWorkerRegistry(
         workers=load_llm_workers(resolved_layout),
@@ -1527,34 +1512,9 @@ def create_router_app(*, layout: ArtifactLayout | None = None) -> FastAPI:
         snapshot = dashboard_llm_router.snapshot()
         if any(item.active for item in snapshot.connections):
             app.state.router_no_active_since = None
-            resumable_jobs = sorted(
-                (
-                    job_snapshot.created_at,
-                    job_snapshot.job_id,
-                )
-                for job_snapshot in dashboard_job_manager.list_snapshots()
-                if job_snapshot.status == "paused"
-                and isinstance(job_snapshot.metadata, dict)
-                and job_snapshot.metadata.get("pause_reason") == ROUTER_WAIT_PAUSE_REASON
-            )
-            for _created_at, job_id in resumable_jobs:
-                try:
-                    dashboard_job_manager.resume(job_id)
-                except (KeyError, ValueError):
-                    continue
-                break
             return
         if app.state.router_no_active_since is None:
             app.state.router_no_active_since = time.monotonic()
-        for job_snapshot in dashboard_job_manager.list_snapshots():
-            if not _job_depends_on_router(job_snapshot):
-                continue
-            if job_snapshot.status != "running":
-                continue
-            try:
-                dashboard_job_manager.pause(job_snapshot.job_id, reason=ROUTER_WAIT_PAUSE_REASON)
-            except (KeyError, ValueError):
-                continue
 
     def _router_panel_data(*, error: str | None = None) -> dict[str, Any]:
         cache_entry = app.state.router_panel_cache
