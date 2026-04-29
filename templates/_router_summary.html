@@ -1,0 +1,7 @@
+<span class="pill">{{ router_panel.total_prompt_tokens_label }} in</span>
+<span class="pill">{{ router_panel.total_completion_tokens_label }} out</span>
+<span class="pill">{{ router_panel.total_output_tokens_per_second }} t/s</span>
+<span class="pill">{{ router_panel.average_request_seconds }} s avg</span>
+<span class="pill">{{ router_panel.connections | sum(attribute='in_flight_requests') }} live</span>
+<span class="pill">{{ router_panel.waiting_requests }} wait</span>
+<a class="pill pill-link {% if router_panel.error_count > 0 %}pill-error{% endif %}" href="/router/errors">Errors {{ router_panel.error_count }}</a>

@@ -1,0 +1,49 @@
+FROM ghcr.io/ggml-org/llama.cpp:server-cuda
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    LLAMA_CPP_ROOT="/app" \
+    LD_LIBRARY_PATH="/app:/usr/local/cuda/lib64" \
+    PATH="/opt/llm-router-worker-venv/bin:/app:${PATH}"
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    python3 \
+    python3-pip \
+    python3-venv \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt/llm-router-worker
+
+COPY app.py /opt/llm-router-worker/app.py
+COPY config_loading.py /opt/llm-router-worker/config_loading.py
+COPY llm_config.py /opt/llm-router-worker/llm_config.py
+COPY llama_worker.py /opt/llm-router-worker/llama_worker.py
+COPY worker_multi_gpu.py /opt/llm-router-worker/worker_multi_gpu.py
+COPY paths.py /opt/llm-router-worker/paths.py
+COPY worker_registry.py /opt/llm-router-worker/worker_registry.py
+COPY worker_store.py /opt/llm-router-worker/worker_store.py
+COPY dashboard /opt/llm-router-worker/dashboard
+COPY patterns /opt/llm-router-worker/patterns
+COPY worker-entrypoint.sh /usr/local/bin/worker-entrypoint
+
+RUN python3 -m venv /opt/llm-router-worker-venv \
+ && /opt/llm-router-worker-venv/bin/pip install --upgrade pip setuptools wheel \
+ && /opt/llm-router-worker-venv/bin/pip install \
+      "fastapi>=0.135.3" \
+      "httpx>=0.28.1" \
+      "jinja2>=3.1.6" \
+      "petname>=2.6" \
+      "pyyaml>=6.0.2" \
+      "uvicorn>=0.34.3" \
+ && chmod +x /usr/local/bin/worker-entrypoint \
+ && printf '/app\n/usr/local/cuda/lib64\n' > /etc/ld.so.conf.d/llama-worker.conf \
+ && ldconfig \
+ && ln -sf /app/llama-server /usr/local/bin/llama-server
+
+WORKDIR /workspace
+
+ENTRYPOINT ["/usr/local/bin/worker-entrypoint"]

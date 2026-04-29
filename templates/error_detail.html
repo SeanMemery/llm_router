@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Router Error #{{ entry.id }}</title>
+  <link rel="stylesheet" href="/static/router.css">
+</head>
+<body>
+  <main class="page-shell">
+    <section class="card">
+      <div class="card-topline">
+        <div>
+          <p class="section-kicker">LLM Router</p>
+          <h2>Error #{{ entry.id }}</h2>
+          <p class="metric-subtle">{{ entry.timestamp or 'Unknown time' }}</p>
+        </div>
+        <div class="router-summary-pills">
+          <a class="pill pill-link" href="/router/errors">Back</a>
+          <a class="pill pill-link" href="/">Home</a>
+        </div>
+      </div>
+      <div class="error-detail">
+        <h3>Error</h3>
+        <pre class="code-block">{{ entry.error or 'Unknown error' }}</pre>
+        <h3>Payload</h3>
+        <pre class="code-block">{{ entry.payload | tojson(indent=2) }}</pre>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

@@ -1,0 +1,5 @@
+ARG BASE_IMAGE=ghcr.io/seanmemery/vllm-router-worker:latest
+FROM ${BASE_IMAGE}
+
+ENV LLM_WORKER_MULTI_GPU=1 \
+    LLM_WORKER_PARALLEL_PER_GPU=12

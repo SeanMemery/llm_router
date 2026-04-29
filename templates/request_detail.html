@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ page_title }}</title>
+  <link rel="stylesheet" href="/static/router.css">
+</head>
+<body>
+  <main class="page-shell page-shell-wide">
+    <section class="card request-detail-card">
+      <div class="card-topline">
+        <div>
+          <p class="section-kicker">LLM Router</p>
+          <h2>Request {{ summary.id or entry.id }}</h2>
+          <p class="metric-subtle">{{ summary.timestamp_label or entry.completed_at or 'Unknown time' }}</p>
+        </div>
+        <div class="router-summary-pills">
+          <span class="pill {% if summary.status == 'completed' %}status-running{% else %}pill-error{% endif %}">
+            {{ summary.status_label or summary.status or entry.status or 'Unknown' }}
+          </span>
+          <a class="pill pill-link" href="/">Home</a>
+        </div>
+      </div>
+
+      <div class="request-stat-grid">
+        <div class="router-stat-card">
+          <span class="router-stat-label">Input tokens</span>
+          <strong class="router-stat-value">{{ summary.prompt_tokens_label or '--' }}</strong>
+        </div>
+        <div class="router-stat-card">
+          <span class="router-stat-label">Output tokens</span>
+          <strong class="router-stat-value">{{ summary.completion_tokens_label or '--' }}</strong>
+        </div>
+        <div class="router-stat-card">
+          <span class="router-stat-label">Duration</span>
+          <strong class="router-stat-value">{{ summary.duration_label or '--' }}</strong>
+        </div>
+        <div class="router-stat-card">
+          <span class="router-stat-label">HTTP status</span>
+          <strong class="router-stat-value">{{ summary.http_status_code or entry.http_status_code or '--' }}</strong>
+        </div>
+      </div>
+
+      <div class="request-focus-stack">
+        <section class="request-detail-section request-focus-section">
+          <div class="request-focus-head">
+            <p class="section-kicker">Input</p>
+            <span class="request-focus-subtle">Model input text</span>
+          </div>
+          {% if input_blocks %}
+          <div class="request-message-stack">
+            {% for block in input_blocks %}
+            <article class="request-message-card">
+              <div class="request-message-head">
+                <span class="request-message-role">{{ block.role }}</span>
+              </div>
+              <pre class="code-block request-message-body">{{ block.text }}</pre>
+            </article>
+            {% endfor %}
+          </div>
+          {% else %}
+          <pre class="code-block">No parsed input text available.</pre>
+          {% endif %}
+          {% if image_blocks %}
+          <div class="request-focus-head request-focus-head-inline">
+            <p class="section-kicker">Input Images</p>
+            <span class="request-focus-subtle">{{ image_blocks | length }} image{{ '' if (image_blocks | length) == 1 else 's' }}</span>
+          </div>
+          <div class="request-image-grid">
+            {% for image in image_blocks %}
+            <article class="request-image-card">
+              <div class="request-image-head">
+                <span class="request-message-role">{{ image.role }}</span>
+                <span class="request-image-index">#{{ image.index }}</span>
+              </div>
+              <img class="request-image-preview" src="{{ image.source }}" alt="Input image {{ image.index }}">
+              <code class="request-image-source">{{ image.source }}</code>
+            </article>
+            {% endfor %}
+          </div>
+          {% endif %}
+        </section>
+
+        {% if reasoning_blocks %}
+        <section class="request-detail-section request-focus-section">
+          <div class="request-focus-head">
+            <p class="section-kicker">Reasoning</p>
+            <span class="request-focus-subtle">Separated when provided by the model</span>
+          </div>
+          <div class="request-message-stack">
+            {% for block in reasoning_blocks %}
+            <pre class="code-block request-message-body">{{ block }}</pre>
+            {% endfor %}
+          </div>
+        </section>
+        {% endif %}
+
+        <section class="request-detail-section request-focus-section">
+          <div class="request-focus-head">
+            <p class="section-kicker">Output</p>
+            <span class="request-focus-subtle">Model response text</span>
+          </div>
+          {% if output_blocks %}
+          <div class="request-message-stack">
+            {% for block in output_blocks %}
+            <pre class="code-block request-message-body">{{ block }}</pre>
+            {% endfor %}
+          </div>
+          {% else %}
+          <pre class="code-block">No parsed output text available.</pre>
+          {% endif %}
+        </section>
+      </div>
+
+      <div class="request-detail-grid">
+        <section class="request-detail-section">
+          <p class="section-kicker">Routing</p>
+          <div class="request-meta-grid">
+            <div class="request-meta-item">
+              <span class="request-meta-label">Requested model</span>
+              <code>{{ entry.requested_model or summary.requested_model or '--' }}</code>
+            </div>
+            <div class="request-meta-item">
+              <span class="request-meta-label">Selected model</span>
+              <code>{{ entry.connection.selected_model or summary.selected_model or '--' }}</code>
+            </div>
+            <div class="request-meta-item">
+              <span class="request-meta-label">Base URL</span>
+              <code>{{ entry.connection.base_url or summary.base_url or '--' }}</code>
+            </div>
+            <div class="request-meta-item">
+              <span class="request-meta-label">Connection</span>
+              <code>{{ entry.connection.connection_id or '--' }}</code>
+            </div>
+            <div class="request-meta-item">
+              <span class="request-meta-label">Source</span>
+              <code>{{ entry.connection.source_kind or '--' }}</code>
+            </div>
+            <div class="request-meta-item">
+              <span class="request-meta-label">Transport</span>
+              <code>{{ entry.connection.transport_mode or '--' }}</code>
+            </div>
+            <div class="request-meta-item">
+              <span class="request-meta-label">Worker</span>
+              <code>{{ entry.connection.worker_id or '--' }}</code>
+            </div>
+            <div class="request-meta-item">
+              <span class="request-meta-label">Worker request</span>
+              <code>{{ entry.connection.worker_request_id or '--' }}</code>
+            </div>
+            <div class="request-meta-item">
+              <span class="request-meta-label">Path</span>
+              <code>{{ entry.request_path or '--' }}</code>
+            </div>
+            <div class="request-meta-item">
+              <span class="request-meta-label">Public route</span>
+              <code>{{ 'Yes' if entry.received_via_public_router else 'No' }}</code>
+            </div>
+          </div>
+        </section>
+
+        <section class="request-detail-section">
+          <p class="section-kicker">Usage And Timing</p>
+          <div class="request-detail-stack">
+            <div>
+              <p class="request-meta-label">Timing</p>
+              <pre class="code-block">{{ entry.timing | tojson(indent=2) }}</pre>
+            </div>
+            <div>
+              <p class="request-meta-label">Usage</p>
+              <pre class="code-block">{{ entry.usage | tojson(indent=2) }}</pre>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      {% if entry.error %}
+      <section class="request-detail-section request-detail-error">
+        <p class="section-kicker">Error</p>
+        <pre class="code-block">{{ entry.error }}</pre>
+      </section>
+      {% endif %}
+
+      <div class="request-detail-stack">
+        <section class="request-detail-section">
+          <p class="section-kicker">Request Headers</p>
+          <pre class="code-block">{{ entry.request_headers | tojson(indent=2) }}</pre>
+        </section>
+
+        <section class="request-detail-section">
+          <p class="section-kicker">Response Headers</p>
+          <pre class="code-block">{{ entry.response_headers | tojson(indent=2) }}</pre>
+        </section>
+
+        <section class="request-detail-section">
+          <p class="section-kicker">Request Payload</p>
+          <pre class="code-block">{{ entry.request | tojson(indent=2) }}</pre>
+        </section>
+
+        <section class="request-detail-section">
+          <p class="section-kicker">Response Body</p>
+          <pre class="code-block">{{ entry.response | tojson(indent=2) }}</pre>
+        </section>
+
+        <section class="request-detail-section">
+          <p class="section-kicker">Full Record</p>
+          <pre class="code-block">{{ entry | tojson(indent=2) }}</pre>
+        </section>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Router Errors</title>
+  <link rel="stylesheet" href="/static/router.css">
+</head>
+<body>
+  <main class="page-shell">
+    <section class="card">
+      <div class="card-topline">
+        <div>
+          <p class="section-kicker">LLM Router</p>
+          <h2>Request Errors</h2>
+          <p class="metric-subtle">{{ errors|length }} recorded</p>
+        </div>
+        <div class="router-summary-pills">
+          <form method="post" action="/router/errors/clear">
+            <button class="pill pill-link pill-error" type="submit">Clear errors</button>
+          </form>
+          <a class="pill pill-link" href="/">Back</a>
+        </div>
+      </div>
+      <div class="error-list">
+        {% if not errors %}
+        <p class="empty">No error requests recorded yet.</p>
+        {% endif %}
+        {% for entry in errors %}
+        <a class="error-card" href="/router/errors/{{ entry.id }}">
+          <div class="error-card-head">
+            <span class="error-card-time">{{ entry.timestamp or 'Unknown time' }}</span>
+            <span class="error-card-id">#{{ entry.id }}</span>
+          </div>
+          <div class="error-card-body">
+            <p class="error-card-message">{{ entry.error or 'Unknown error' }}</p>
+          </div>
+          <div class="error-card-meta">Payload keys: {{ entry.payload.keys() | list | join(', ') }}</div>
+        </a>
+        {% endfor %}
+      </div>
+    </section>
+  </main>
+</body>
+</html>

@@ -1,0 +1,40 @@
+FROM docker.io/vllm/vllm-openai:nightly
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PATH="/opt/llm-router-worker-venv/bin:${PATH}" \
+    LLM_WORKER_RUNTIME="vllm" \
+    LLAMA_MAX_CONCURRENCY="12"
+
+RUN python3 -m venv /opt/llm-router-worker-venv \
+ && /opt/llm-router-worker-venv/bin/pip install --upgrade pip setuptools wheel \
+ && /opt/llm-router-worker-venv/bin/pip install \
+      "fastapi>=0.135.3" \
+      "httpx>=0.28.1" \
+      "jinja2>=3.1.6" \
+      "petname>=2.6" \
+      "pyyaml>=6.0.2" \
+      "uvicorn>=0.34.3"
+
+WORKDIR /opt/llm-router-worker
+
+COPY app.py /opt/llm-router-worker/app.py
+COPY config_loading.py /opt/llm-router-worker/config_loading.py
+COPY llm_config.py /opt/llm-router-worker/llm_config.py
+COPY paths.py /opt/llm-router-worker/paths.py
+COPY worker_registry.py /opt/llm-router-worker/worker_registry.py
+COPY worker_store.py /opt/llm-router-worker/worker_store.py
+COPY dashboard /opt/llm-router-worker/dashboard
+COPY patterns /opt/llm-router-worker/patterns
+COPY worker-entrypoint.sh /usr/local/bin/worker-entrypoint
+COPY vllm_worker.py /opt/llm-router-worker/vllm_worker.py
+COPY worker_multi_gpu_vllm.py /opt/llm-router-worker/worker_multi_gpu_vllm.py
+COPY worker_multi_gpu.py /opt/llm-router-worker/worker_multi_gpu.py
+COPY llama_worker.py /opt/llm-router-worker/llama_worker.py
+
+RUN chmod +x /usr/local/bin/worker-entrypoint
+
+WORKDIR /workspace
+
+ENTRYPOINT ["/usr/local/bin/worker-entrypoint"]

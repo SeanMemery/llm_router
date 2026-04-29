@@ -1,0 +1,293 @@
+{% macro compact_tokens(value) -%}
+{%- set amount = value or 0 -%}
+{%- set abs_amount = amount if amount >= 0 else -amount -%}
+{%- if abs_amount >= 1000000000 -%}
+{{ "%.1fB"|format(amount / 1000000000) }}
+{%- elif abs_amount >= 1000000 -%}
+{{ "%.1fM"|format(amount / 1000000) }}
+{%- elif abs_amount >= 1000 -%}
+{{ "%.1fK"|format(amount / 1000) }}
+{%- else -%}
+{{ amount }}
+{%- endif -%}
+{%- endmacro %}
+{% if not router_panel.endpoints %}
+<p class="empty">No backend connections configured yet.</p>
+{% endif %}
+{% for endpoint in router_panel.endpoints %}
+<details class="router-endpoint" data-persist-key="router-endpoint-{{ endpoint.endpoint_id }}">
+  <summary class="router-endpoint-summary">
+    <div class="router-endpoint-main">
+      <div class="router-endpoint-title">
+        <code>{{ endpoint.base_url }}</code>
+        <span class="pill">{{ endpoint.source_label }}</span>
+        {% if endpoint.starred %}
+        <span class="router-star-badge" title="Starred URL">★</span>
+        {% endif %}
+      </div>
+      <div class="router-token-strip" title="Total output tokens for this URL">
+        <span class="router-token-bar" aria-hidden="true"></span>
+        <span class="router-token-label">{{ endpoint.completion_tokens_label }} tks</span>
+      </div>
+    </div>
+    <div class="router-endpoint-summary-right">
+      <form method="post" action="/router/urls/priority" class="router-worker-inline-form" onclick="event.stopPropagation();">
+        <input type="hidden" name="next" value="/">
+        <input type="hidden" name="connection_base_url" value="{{ endpoint.base_url }}">
+        <label class="router-worker-inline-label">
+          <span>Priority</span>
+          <input class="input-parallel auto-submit router-worker-inline-input" type="number" min="1" max="99" name="connection_priority" value="{{ endpoint.priority }}">
+        </label>
+      </form>
+      <form method="post" action="/router/urls/{{ 'disable' if endpoint.status_label == 'Active' else 'enable' }}" onsubmit="event.stopPropagation();">
+        <input type="hidden" name="next" value="/">
+        <input type="hidden" name="connection_base_url" value="{{ endpoint.base_url }}">
+        <button class="pill status-{{ endpoint.status_class }}" type="submit" onclick="event.stopPropagation();">
+          {{ endpoint.status_label }}
+        </button>
+      </form>
+      <div class="router-summary-activity" aria-label="URL activity">
+        <div class="router-slot-strip" title="{{ endpoint.in_flight_requests }}/{{ endpoint.max_concurrent_requests }} in flight">
+          {% set slot_count = endpoint.max_concurrent_requests if endpoint.max_concurrent_requests > 0 else 1 %}
+          {% for _ in range(slot_count) %}
+          <span class="router-slot {% if loop.index0 < endpoint.in_flight_requests %}is-active{% endif %}"></span>
+          {% endfor %}
+        </div>
+        <span class="router-activity-stat">{{ endpoint.in_flight_requests }}/{{ endpoint.max_concurrent_requests }}</span>
+      </div>
+    </div>
+  </summary>
+
+  <div class="router-endpoint-body router-endpoint-detail">
+    <div class="router-endpoint-detail-grid">
+      <section class="router-detail-card">
+        <p class="section-kicker">Overview</p>
+        <div class="router-stat-grid">
+          <div class="router-stat-card">
+            <span class="router-stat-label">Models</span>
+            <strong class="router-stat-value">{{ endpoint.model_count }}</strong>
+          </div>
+          <div class="router-stat-card">
+            <span class="router-stat-label">Requests</span>
+            <strong class="router-stat-value">{{ endpoint.request_count }}</strong>
+          </div>
+          <div class="router-stat-card">
+            <span class="router-stat-label">In flight</span>
+            <strong class="router-stat-value">{{ endpoint.in_flight_requests }}</strong>
+          </div>
+          <div class="router-stat-card">
+            <span class="router-stat-label">Parallel</span>
+            <strong class="router-stat-value">{{ endpoint.max_concurrent_requests }}</strong>
+          </div>
+          <div class="router-stat-card">
+            <span class="router-stat-label">Active</span>
+            <strong class="router-stat-value">{{ endpoint.active_models }}</strong>
+          </div>
+          <div class="router-stat-card">
+            <span class="router-stat-label">Disabled</span>
+            <strong class="router-stat-value">{{ endpoint.disabled_models }}</strong>
+          </div>
+        </div>
+      </section>
+
+      <section class="router-detail-card">
+        <p class="section-kicker">URL Controls</p>
+        <div class="router-detail-stack">
+          {% if endpoint.source_kind == 'manual' %}
+          <form method="post" action="/router/urls/update" class="router-detail-form">
+            <input type="hidden" name="next" value="/">
+            <input type="hidden" name="connection_base_url" value="{{ endpoint.base_url }}">
+            <label>
+              <span>API key</span>
+              <input type="password" name="connection_api_key" value="" placeholder="{{ 'Replace key' if endpoint.api_key_present else 'Set key' }}" autocomplete="off">
+            </label>
+            <button class="secondary-button" type="submit">{{ 'Update key' if endpoint.api_key_present else 'Save key' }}</button>
+          </form>
+          <div class="router-inline-buttons">
+            <form method="post" action="/router/urls/{{ 'unstar' if endpoint.starred else 'star' }}">
+              <input type="hidden" name="next" value="/">
+              <input type="hidden" name="connection_base_url" value="{{ endpoint.base_url }}">
+              <label class="router-star-toggle" title="Prefer this URL until it is full">
+                <input
+                  class="router-star-input"
+                  type="checkbox"
+                  {% if endpoint.starred %}checked{% endif %}
+                  onchange="this.form.action = this.checked ? '/router/urls/star' : '/router/urls/unstar'; this.form.submit();"
+                >
+                <span class="router-star-box">Star</span>
+              </label>
+            </form>
+            <form method="post" action="/router/urls/delete">
+              <input type="hidden" name="next" value="/">
+              <input type="hidden" name="connection_base_url" value="{{ endpoint.base_url }}">
+              <button class="secondary-button danger-button" type="submit">Remove URL</button>
+            </form>
+          </div>
+          {% else %}
+          <p class="metric-subtle">Live worker endpoint. URL and model inventory come from worker heartbeats.</p>
+          {% endif %}
+        </div>
+      </section>
+
+      <section class="router-detail-card">
+        <p class="section-kicker">{% if endpoint.source_kind == 'manual' %}Add Model{% else %}Endpoint{% endif %}</p>
+        {% if endpoint.source_kind == 'manual' %}
+        <form method="post" action="/router/connections" class="router-detail-form">
+          <input type="hidden" name="next" value="/">
+          <input type="hidden" name="connection_base_url" value="{{ endpoint.base_url }}">
+          <input type="hidden" name="connection_priority" value="{{ endpoint.priority }}">
+          <label>
+            <span>Model id</span>
+            <input type="text" name="connection_model" value="" placeholder="model id">
+          </label>
+          <div class="router-detail-form-row">
+            <label>
+              <span>Parallel</span>
+              <input class="input-parallel" type="number" min="1" name="connection_max_concurrent" value="1">
+            </label>
+            <label class="router-inline-checkbox">
+              <span class="router-toggle">
+                <input class="router-toggle-input" type="checkbox" name="connection_supports_images" value="1" checked>
+                <span class="router-toggle-box">Images</span>
+              </span>
+            </label>
+          </div>
+          <button class="secondary-button" type="submit">Add model</button>
+        </form>
+        {% else %}
+        <div class="router-detail-stack">
+          <div class="router-stat-grid router-stat-grid-compact">
+            <div class="router-stat-card">
+              <span class="router-stat-label">Priority</span>
+              <strong class="router-stat-value">P{{ endpoint.priority }}</strong>
+            </div>
+            <div class="router-stat-card">
+              <span class="router-stat-label">Status</span>
+              <strong class="router-stat-value">{{ endpoint.status_label }}</strong>
+            </div>
+          </div>
+          <p class="metric-subtle">Use worker controls in the same column to adjust endpoint-backed workers.</p>
+        </div>
+        {% endif %}
+      </section>
+    </div>
+
+    {% if endpoint.last_error and 'Manually disabled' not in endpoint.last_error %}
+    <div class="router-endpoint-notice">
+      <strong>Last error</strong>
+      <span>{{ endpoint.last_error }}</span>
+    </div>
+    {% endif %}
+
+    <div class="router-endpoint-models">
+      <div class="router-endpoint-models-head">
+        <div>
+          <p class="section-kicker">Models</p>
+          <p class="metric-subtle">{{ endpoint.model_count }} model{% if endpoint.model_count != 1 %}s{% endif %} attached to this URL.</p>
+        </div>
+        <div class="router-summary-pills">
+          <span class="pill">{{ endpoint.active_models }} active</span>
+          {% if endpoint.inactive_models %}
+          <span class="pill">{{ endpoint.inactive_models }} inactive</span>
+          {% endif %}
+          {% if endpoint.disabled_models %}
+          <span class="pill status-failed">{{ endpoint.disabled_models }} disabled</span>
+          {% endif %}
+        </div>
+      </div>
+
+      {% if endpoint.models %}
+      <div class="router-model-card-grid">
+        {% for connection in endpoint.models %}
+        {% set reqs = connection.telemetry.request_count or 0 %}
+        {% set avg_ctx = (connection.telemetry.total_prompt_tokens or 0) / reqs if reqs > 0 else None %}
+        <article class="router-model-card">
+          <div class="router-model-card-head">
+            <div class="router-model-card-title">
+              <strong class="router-model-name">{{ connection.model }}</strong>
+              <div class="router-model-card-badges">
+                <span class="pill">P{{ connection.priority }}</span>
+                {% if connection.canonical_model %}
+                <span class="pill pill-canonical">{{ connection.canonical_model }}</span>
+                {% endif %}
+                <span class="pill status-{{ 'failed' if connection.manually_disabled else ('running' if connection.active else 'failed') }}">
+                  {{ 'Disabled' if connection.manually_disabled else ('Active' if connection.active else 'Inactive') }}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <div class="router-model-card-body">
+            <form method="post" action="/router/connections/{{ connection.connection_id }}" class="router-model-settings">
+              <input type="hidden" name="next" value="/">
+              <input type="hidden" name="connection_model" value="{{ connection.model }}">
+              <input type="hidden" name="connection_priority" value="{{ connection.priority }}">
+              <label>
+                <span>Parallel</span>
+                <input class="input-parallel auto-submit" type="number" min="1" name="connection_max_concurrent" value="{{ connection.max_concurrent_requests }}">
+              </label>
+              <label class="router-inline-checkbox">
+                <span class="router-toggle">
+                  <input class="router-toggle-input auto-submit" type="checkbox" name="connection_supports_images" value="1" {% if connection.supports_image_inputs %}checked{% endif %}>
+                  <span class="router-toggle-box">Images</span>
+                </span>
+              </label>
+            </form>
+
+            <div class="router-model-metric-grid">
+              <div class="router-model-metric">
+                <span class="router-model-metric-label">Requests</span>
+                <strong>{{ connection.telemetry.request_count }}</strong>
+              </div>
+              <div class="router-model-metric">
+                <span class="router-model-metric-label">Avg time</span>
+                <strong>{% if connection.telemetry.average_recent_request_seconds is not none %}{{ "%.2f"|format(connection.telemetry.average_recent_request_seconds) }} s{% else %}--{% endif %}</strong>
+              </div>
+              <div class="router-model-metric">
+                <span class="router-model-metric-label">Avg tok/s</span>
+                <strong>{{ "%.2f"|format(connection.telemetry.average_output_tokens_per_second or 0.0) }}</strong>
+              </div>
+              <div class="router-model-metric">
+                <span class="router-model-metric-label">Ctx avg</span>
+                <strong>{% if avg_ctx is not none %}{{ "%.1fK"|format(avg_ctx / 1000) }}{% else %}--{% endif %}</strong>
+              </div>
+              <div class="router-model-metric">
+                <span class="router-model-metric-label">Prompt toks</span>
+                <strong>{{ compact_tokens(connection.telemetry.total_prompt_tokens or 0) }}</strong>
+              </div>
+              <div class="router-model-metric">
+                <span class="router-model-metric-label">Output toks</span>
+                <strong>{{ compact_tokens(connection.telemetry.total_completion_tokens or 0) }}</strong>
+              </div>
+            </div>
+
+            <div class="router-inline-buttons">
+              {% if connection.manually_disabled or not connection.active %}
+              <form method="post" action="/router/connections/{{ connection.connection_id }}/enable">
+                <input type="hidden" name="next" value="/">
+                <button class="secondary-button" type="submit">Enable</button>
+              </form>
+              {% else %}
+              <form method="post" action="/router/connections/{{ connection.connection_id }}/disable">
+                <input type="hidden" name="next" value="/">
+                <button class="secondary-button" type="submit">Disable</button>
+              </form>
+              {% endif %}
+              {% if connection.source_kind == 'manual' %}
+              <form method="post" action="/router/connections/{{ connection.connection_id }}/delete">
+                <input type="hidden" name="next" value="/">
+                <button class="secondary-button danger-button" type="submit">Remove</button>
+              </form>
+              {% endif %}
+            </div>
+          </div>
+        </article>
+        {% endfor %}
+      </div>
+      {% else %}
+      <div class="router-empty-card">No models attached to this URL yet.</div>
+      {% endif %}
+    </div>
+  </div>
+</details>
+{% endfor %}

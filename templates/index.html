@@ -1,0 +1,388 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ page_title }}</title>
+  <link rel="stylesheet" href="/static/router.css">
+</head>
+<body>
+  <main class="page-shell page-shell-home">
+    {% if router_panel.error %}
+    <section class="flash flash-error">
+      <strong>Router error:</strong> {{ router_panel.error }}
+    </section>
+    {% endif %}
+
+    <div class="router-home-layout">
+      <section class="card router-panel">
+        <div class="card-topline router-panel-topline">
+          <div class="router-header-main">
+            <div class="router-header-title-row">
+              <p class="section-kicker">LLM Router</p>
+            </div>
+            <div class="router-header-meta">
+              <span class="router-header-meta-item">
+                <span class="router-header-meta-label">URL</span>
+                <code>{{ router_panel.base_url }}</code>
+              </span>
+              <span class="router-header-meta-item">
+                <span class="router-header-meta-label">Model</span>
+                <code>{{ router_panel.shared_model }}</code>
+              </span>
+            </div>
+          </div>
+          <div class="router-header-actions">
+            <div class="router-summary-live router-summary-pills" id="router-summary-live">{% include "_router_summary.html" %}</div>
+            <details class="refresh-menu" id="refresh-menu">
+              <summary class="pill pill-refresh pill-refresh-compact" id="rendered-at">{{ router_panel.rendered_at }}</summary>
+              <div class="refresh-popover" id="refresh-popover">
+                <label class="refresh-popover-label" for="refresh-interval">Update every</label>
+                <div class="refresh-popover-row">
+                  <input id="refresh-interval" class="refresh-interval-input" type="number" min="1" max="300" step="1" value="10">
+                  <span class="refresh-popover-unit">s</span>
+                </div>
+              </div>
+            </details>
+          </div>
+        </div>
+
+        <div class="router-column" id="router-live-public-access">{% include "_router_public_access.html" %}</div>
+
+        <details class="router-metrics-card" data-persist-key="router-metrics-card" open>
+          <summary class="router-metrics-summary">
+            <div>
+              <p class="section-kicker">Router Activity</p>
+              <h3>In-flight requests and throughput</h3>
+              <p class="metric-subtle">Last 1 hour. Left axis: in-flight requests. Right axis: throughput (tokens/sec).</p>
+            </div>
+            <span class="pill">Toggle</span>
+          </summary>
+          <div class="router-metrics-chart-shell">
+            <div class="router-metrics-legend">
+              <span class="router-metrics-legend-item"><span class="router-metrics-swatch router-metrics-swatch-inflight"></span>In flight</span>
+              <span class="router-metrics-legend-item"><span class="router-metrics-swatch router-metrics-swatch-throughput"></span>Throughput</span>
+            </div>
+            <div id="router-metrics-chart" class="router-metrics-chart" aria-label="Router activity chart"></div>
+          </div>
+        </details>
+
+        <div class="router-column router-add-card">
+          <form method="post" action="/router/connections" class="router-add-form">
+            <input type="hidden" name="next" value="/">
+            <div class="router-add-grid">
+              <label>
+                <span>Base URL</span>
+                <input type="text" name="connection_base_url" value="">
+              </label>
+              <label>
+                <span>API key</span>
+                <input type="password" name="connection_api_key" value="" autocomplete="off">
+              </label>
+              <label>
+                <span>Model</span>
+                <input class="input-model-id" type="text" name="connection_model" value="">
+              </label>
+              <label>
+                <span>Parallel</span>
+                <input class="input-parallel" type="number" min="1" name="connection_max_concurrent" value="1">
+              </label>
+              <label>
+                <span>Priority</span>
+                <input class="input-parallel" type="number" min="1" max="99" name="connection_priority" value="2">
+              </label>
+              <label class="router-add-toggle-field">
+                <span>Images</span>
+                <span class="router-toggle">
+                  <input class="router-toggle-input" type="checkbox" name="connection_supports_images" value="1" checked>
+                  <span class="router-toggle-box">Images</span>
+                </span>
+              </label>
+              <div class="router-actions router-add-submit">
+                <button class="secondary-button" type="submit">Add URL</button>
+              </div>
+            </div>
+          </form>
+        </div>
+
+        <div class="router-column" id="router-live-workers">{% include "_router_workers.html" %}</div>
+      </section>
+
+      <aside class="card router-request-rail" id="router-live-requests">{% include "_router_requests_panel.html" %}</aside>
+    </div>
+  </main>
+  <script id="router-history-data" type="application/json">{{ router_history | tojson }}</script>
+  <script>
+    (() => {
+      const routerTimeZone = "Europe/London";
+      const timeFormatter = new Intl.DateTimeFormat([], {
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: false,
+        timeZone: routerTimeZone,
+      });
+      const chartTickFormatter = new Intl.DateTimeFormat([], {
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+        timeZone: routerTimeZone,
+      });
+      const stamp = document.getElementById("rendered-at");
+      const refreshMenu = document.getElementById("refresh-menu");
+      const chartRoot = document.getElementById("router-metrics-chart");
+      if (stamp && !stamp.textContent.trim()) {
+        stamp.textContent = timeFormatter.format(new Date());
+      }
+
+      const storageKey = `llm-router-page-state:${window.location.pathname}`;
+      const fieldSelector = 'input:not([type="hidden"]), textarea, select';
+      const detailsSelector = 'details.router-endpoint, details[data-persist-key]';
+
+      const fieldKey = (field, index) => {
+        const persistKey = field.dataset.persistKey;
+        if (persistKey) {
+          return persistKey;
+        }
+        const form = field.closest("form");
+        const formAction = form?.getAttribute("action") || "";
+        const fieldName = field.getAttribute("name") || "";
+        const fieldType = field.getAttribute("type") || field.tagName.toLowerCase();
+        return `${formAction}::${fieldName}::${fieldType}::${index}`;
+      };
+
+      const saveState = () => {
+        const payload = {
+          fields: {},
+          details: {},
+        };
+        Array.from(document.querySelectorAll(detailsSelector)).forEach((item, index) => {
+          const key = item.dataset.persistKey || `details-${index}`;
+          payload.details[key] = item.open;
+        });
+        Array.from(document.querySelectorAll(fieldSelector)).forEach((field, index) => {
+          const key = fieldKey(field, index);
+          if (field instanceof HTMLInputElement && field.type === "checkbox") {
+            payload.fields[key] = { checked: field.checked };
+            return;
+          }
+          payload.fields[key] = { value: field.value };
+        });
+        window.sessionStorage.setItem(storageKey, JSON.stringify(payload));
+      };
+
+      const restoreState = () => {
+        const raw = window.sessionStorage.getItem(storageKey);
+        if (!raw) return;
+        try {
+          const payload = JSON.parse(raw);
+          Array.from(document.querySelectorAll(fieldSelector)).forEach((field, index) => {
+            const saved = payload?.fields?.[fieldKey(field, index)];
+            if (!saved) return;
+            if (field instanceof HTMLInputElement && field.type === "checkbox") {
+              field.checked = Boolean(saved.checked);
+              return;
+            }
+            if (typeof saved.value === "string") {
+              field.value = saved.value;
+            }
+          });
+          if (payload?.details && typeof payload.details === "object") {
+            Array.from(document.querySelectorAll(detailsSelector)).forEach((item, index) => {
+              const key = item.dataset.persistKey || `details-${index}`;
+              if (Object.prototype.hasOwnProperty.call(payload.details, key)) {
+                item.open = Boolean(payload.details[key]);
+              }
+            });
+          }
+        } catch {
+          window.sessionStorage.removeItem(storageKey);
+        }
+      };
+
+      restoreState();
+
+      document.addEventListener("input", saveState, { passive: true });
+      document.addEventListener("change", saveState, { passive: true });
+      document.addEventListener("submit", saveState, { passive: true });
+      window.addEventListener("beforeunload", saveState, { passive: true });
+
+      let refreshTimer = null;
+      const refreshIntervalInput = document.getElementById("refresh-interval");
+      const summaryLive = document.getElementById("router-summary-live");
+      const publicAccessLive = document.getElementById("router-live-public-access");
+      const workersLive = document.getElementById("router-live-workers");
+      const requestsLive = document.getElementById("router-live-requests");
+      const endpointsLive = document.getElementById("router-live-endpoints");
+      let metricsHistory = (() => {
+        try {
+          return JSON.parse(document.getElementById("router-history-data")?.textContent || "{}");
+        } catch {
+          return { points: [], window_seconds: 3600 };
+        }
+      })();
+      const refreshDelayMs = () => {
+        const value = Number.parseInt(refreshIntervalInput?.value || "10", 10);
+        if (!Number.isFinite(value)) return 10000;
+        return Math.min(300, Math.max(1, value)) * 1000;
+      };
+
+      const escapeHtml = (value) => String(value)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;");
+
+      const renderMetricsChart = (historyPayload) => {
+        metricsHistory = historyPayload && typeof historyPayload === "object"
+          ? historyPayload
+          : { points: [], window_seconds: 3600 };
+        if (!chartRoot) return;
+        const points = Array.isArray(metricsHistory.points) ? metricsHistory.points : [];
+        if (!points.length) {
+          chartRoot.innerHTML = '<div class="metric-subtle">No cached router activity yet.</div>';
+          return;
+        }
+        const width = 1024;
+        const height = 260;
+        const padding = { top: 12, right: 58, bottom: 30, left: 52 };
+        const innerWidth = width - padding.left - padding.right;
+        const innerHeight = height - padding.top - padding.bottom;
+        const minEpoch = Number(points[0]?.epoch_seconds || 0);
+        const maxEpoch = Number(points[points.length - 1]?.epoch_seconds || minEpoch + 1);
+        const inflightMax = Math.max(1, ...points.map((item) => Number(item.in_flight_requests || 0)));
+        const throughputMax = Math.max(1, ...points.map((item) => Number(item.throughput || 0)));
+        const xAt = (epoch) => {
+          if (maxEpoch <= minEpoch) return padding.left;
+          return padding.left + ((epoch - minEpoch) / (maxEpoch - minEpoch)) * innerWidth;
+        };
+        const yLeftAt = (value) => padding.top + innerHeight - (Math.max(0, value) / inflightMax) * innerHeight;
+        const yRightAt = (value) => padding.top + innerHeight - (Math.max(0, value) / throughputMax) * innerHeight;
+        const linePath = (values, yAt) => values.map((item, index) => {
+          const x = xAt(Number(item.epoch_seconds || minEpoch)).toFixed(2);
+          const y = yAt(Number(item.value || 0)).toFixed(2);
+          return `${index === 0 ? "M" : "L"} ${x} ${y}`;
+        }).join(" ");
+        const inflightPath = linePath(points.map((item) => ({
+          epoch_seconds: item.epoch_seconds,
+          value: item.in_flight_requests,
+        })), yLeftAt);
+        const throughputPath = linePath(points.map((item) => ({
+          epoch_seconds: item.epoch_seconds,
+          value: item.throughput,
+        })), yRightAt);
+        const tickCount = 4;
+        const timeTicks = Array.from({ length: tickCount + 1 }, (_, index) => {
+          const epoch = minEpoch + ((maxEpoch - minEpoch) * index) / tickCount;
+          const x = xAt(epoch).toFixed(2);
+          const label = chartTickFormatter.format(new Date(epoch * 1000));
+          return `
+            <line x1="${x}" y1="${padding.top}" x2="${x}" y2="${padding.top + innerHeight}" class="router-metrics-gridline" />
+            <text x="${x}" y="${height - 8}" text-anchor="middle" class="router-metrics-axis-label">${escapeHtml(label)}</text>
+          `;
+        }).join("");
+        const leftTicks = Array.from({ length: 4 }, (_, index) => {
+          const value = (inflightMax * (3 - index)) / 3;
+          const y = yLeftAt(value).toFixed(2);
+          return `
+            <line x1="${padding.left}" y1="${y}" x2="${padding.left + innerWidth}" y2="${y}" class="router-metrics-gridline" />
+            <text x="${padding.left - 10}" y="${Number(y) + 4}" text-anchor="end" class="router-metrics-axis-label">${escapeHtml(Math.round(value))}</text>
+          `;
+        }).join("");
+        const rightTicks = Array.from({ length: 4 }, (_, index) => {
+          const value = (throughputMax * (3 - index)) / 3;
+          const y = yRightAt(value).toFixed(2);
+          return `<text x="${width - padding.right + 10}" y="${Number(y) + 4}" text-anchor="start" class="router-metrics-axis-label">${escapeHtml(Math.round(value))}</text>`;
+        }).join("");
+        chartRoot.innerHTML = `
+          <svg viewBox="0 0 ${width} ${height}" class="router-metrics-svg" role="img" aria-label="In-flight requests and throughput over the last hour">
+            ${timeTicks}
+            ${leftTicks}
+            ${rightTicks}
+            <line x1="${padding.left}" y1="${padding.top + innerHeight}" x2="${padding.left + innerWidth}" y2="${padding.top + innerHeight}" class="router-metrics-axis" />
+            <line x1="${padding.left}" y1="${padding.top}" x2="${padding.left}" y2="${padding.top + innerHeight}" class="router-metrics-axis" />
+            <line x1="${padding.left + innerWidth}" y1="${padding.top}" x2="${padding.left + innerWidth}" y2="${padding.top + innerHeight}" class="router-metrics-axis" />
+            <path d="${inflightPath}" class="router-metrics-line router-metrics-line-inflight" />
+            <path d="${throughputPath}" class="router-metrics-line router-metrics-line-throughput" />
+          </svg>
+        `;
+      };
+
+      const refreshLiveView = async () => {
+        try {
+          saveState();
+          const response = await window.fetch("/router/live", {
+            headers: { Accept: "application/json" },
+            cache: "no-store",
+          });
+          if (!response.ok) return;
+          const payload = await response.json();
+          if (summaryLive && typeof payload.summary_html === "string") {
+            summaryLive.innerHTML = payload.summary_html;
+          }
+          if (publicAccessLive && typeof payload.public_access_html === "string") {
+            publicAccessLive.innerHTML = payload.public_access_html;
+          }
+          if (workersLive && typeof payload.workers_html === "string") {
+            workersLive.innerHTML = payload.workers_html;
+          }
+          if (requestsLive && typeof payload.requests_html === "string") {
+            requestsLive.innerHTML = payload.requests_html;
+          }
+          if (endpointsLive && typeof payload.endpoints_html === "string") {
+            endpointsLive.innerHTML = payload.endpoints_html;
+          }
+          if (stamp && typeof payload.rendered_at === "string" && payload.rendered_at.trim()) {
+            stamp.textContent = payload.rendered_at;
+          }
+          if (payload.metrics_history) {
+            renderMetricsChart(payload.metrics_history);
+          }
+          restoreState();
+        } catch {
+          // Keep the current UI if a background refresh fails.
+        }
+      };
+
+      const scheduleRefresh = () => {
+        if (refreshTimer !== null) {
+          window.clearTimeout(refreshTimer);
+        }
+        if (document.visibilityState !== "visible") {
+          refreshTimer = null;
+          return;
+        }
+        refreshTimer = window.setTimeout(() => {
+          refreshLiveView().finally(scheduleRefresh);
+        }, refreshDelayMs());
+      };
+
+      document.addEventListener("visibilitychange", scheduleRefresh, { passive: true });
+      refreshIntervalInput?.addEventListener("input", () => {
+        saveState();
+        scheduleRefresh();
+      }, { passive: true });
+      refreshIntervalInput?.addEventListener("change", () => {
+        const value = Number.parseInt(refreshIntervalInput.value || "10", 10);
+        refreshIntervalInput.value = String(Number.isFinite(value) ? Math.min(300, Math.max(1, value)) : 10);
+        saveState();
+        scheduleRefresh();
+      }, { passive: true });
+      refreshIntervalInput?.addEventListener("keydown", (event) => {
+        if (event.key === "Escape" && refreshMenu instanceof HTMLDetailsElement) {
+          refreshMenu.open = false;
+          stamp?.focus();
+        }
+      });
+      refreshMenu?.addEventListener("toggle", () => {
+        if (refreshMenu instanceof HTMLDetailsElement && refreshMenu.open && refreshIntervalInput) {
+          refreshIntervalInput.focus();
+          refreshIntervalInput.select();
+        }
+      });
+      renderMetricsChart(metricsHistory);
+      scheduleRefresh();
+    })();
+  </script>
+  <script src="/static/router_autosubmit.js"></script>
+</body>
+</html>

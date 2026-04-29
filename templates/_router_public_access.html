@@ -1,0 +1,57 @@
+<details class="router-public-card" data-persist-key="router-public-access">
+  <summary class="router-public-summary">
+    <div class="router-public-main">
+      <p class="section-kicker">Public URL</p>
+      {% if router_panel.public_access.public_base_url %}
+      <div class="router-public-url-row">
+        <code class="router-public-url">{{ router_panel.public_access.public_base_url }}</code>
+      </div>
+      {% else %}
+      <p class="metric-subtle">No public URL configured.</p>
+      {% endif %}
+    </div>
+    <div class="router-public-summary-actions">
+      <span class="pill {% if router_panel.public_access.active %}status-running{% else %}status-failed{% endif %}">
+        {{ router_panel.public_access.status_label }}
+      </span>
+      <span class="pill">Config</span>
+    </div>
+  </summary>
+  <div class="router-public-menu">
+    <form method="post" action="/router/public-access" class="router-public-form">
+      <input type="hidden" name="next" value="/">
+      <div class="router-public-fields">
+        <label>
+          <span>API key</span>
+          <input
+            type="text"
+            name="public_api_key"
+            data-persist-key="router-public-access-api-key"
+            value="{{ router_panel.public_access.public_api_key or '' }}"
+            autocomplete="off"
+            placeholder="{{ 'Required' if not router_panel.public_access.password_set else '' }}"
+          >
+        </label>
+        <button class="secondary-button" type="submit" name="mode" value="save">Save</button>
+        {% if router_panel.public_access.enabled_requested %}
+        <button class="secondary-button" type="submit" name="mode" value="toggle">Disable</button>
+        {% else %}
+        <button class="secondary-button" type="submit" name="mode" value="toggle">
+          Enable
+        </button>
+        <input type="hidden" name="public_enabled" value="1">
+        {% endif %}
+      </div>
+    </form>
+
+    {% if router_panel.public_access.approval_url %}
+    <p class="metric-subtle">
+      <a href="{{ router_panel.public_access.approval_url }}" target="_blank" rel="noreferrer">Open Funnel approval page</a>
+    </p>
+    {% endif %}
+
+    {% if router_panel.public_access.last_error and not router_panel.public_access.approval_url %}
+    <p class="metric-subtle">{{ router_panel.public_access.last_error }}</p>
+    {% endif %}
+  </div>
+</details>

@@ -1,0 +1,29 @@
+<div class="router-request-panel">
+  <div class="router-request-panel-head">
+    <p class="section-kicker">Request Log</p>
+  </div>
+
+  <div class="router-request-list" role="list">
+    {% if not router_requests.requests %}
+    <p class="empty">No cached requests yet.</p>
+    {% endif %}
+    {% for entry in router_requests.requests %}
+    <a class="router-request-row" href="/router/requests/{{ entry.id }}" role="listitem">
+      <div class="router-request-row-head">
+        <span class="router-request-time">{{ entry.timestamp_label or entry.timestamp or 'Unknown time' }}</span>
+        <div class="router-request-head-pills">
+          <span class="pill {% if entry.status == 'completed' %}status-running{% else %}pill-error{% endif %}">
+            {{ entry.status_label or entry.status or 'Unknown' }}
+          </span>
+        </div>
+      </div>
+      <div class="router-request-route">{{ entry.connection_label or entry.base_url or 'Unknown route' }}</div>
+      <div class="router-request-metrics">
+        <span>In {{ entry.prompt_tokens_label or '--' }}</span>
+        <span>Out {{ entry.completion_tokens_label or '--' }}</span>
+        <span>{{ entry.duration_label or '--' }}</span>
+      </div>
+    </a>
+    {% endfor %}
+  </div>
+</div>
