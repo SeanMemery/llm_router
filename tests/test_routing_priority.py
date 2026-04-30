@@ -346,3 +346,14 @@ def test_router_raises_when_known_context_windows_are_too_small() -> None:
             await router.aclose()
 
     asyncio.run(_run())
+
+
+def test_extract_context_tokens_from_meta_n_ctx_train() -> None:
+    record = {
+        "id": "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+        "meta": {
+            "n_ctx_train": 262144,
+        },
+    }
+    parsed = DashboardLLMRouter._extract_context_tokens_from_model_record(record)
+    assert parsed == 262144

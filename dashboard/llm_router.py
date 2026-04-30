@@ -1127,11 +1127,12 @@ class DashboardLLMRouter:
             "max_seq_len",
             "max_position_embeddings",
             "n_ctx",
+            "n_ctx_train",
             "num_ctx",
             "context_window",
         )
         search_spaces: list[dict[str, Any]] = [record]
-        for nested_key in ("metadata", "details", "model_info", "capabilities"):
+        for nested_key in ("metadata", "details", "model_info", "capabilities", "meta"):
             nested = record.get(nested_key)
             if isinstance(nested, dict):
                 search_spaces.append(nested)
