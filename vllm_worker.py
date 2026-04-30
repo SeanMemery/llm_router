@@ -33,6 +33,19 @@ def _env(name: str, default: str | None = None) -> str | None:
     return stripped or default
 
 
+def _normalize_router_url(value: str) -> str:
+    base = str(value or "").strip().rstrip("/")
+    if not base:
+        return ""
+    if base.endswith("/public/v1"):
+        return base[: -len("/public/v1")]
+    if base.endswith("/public"):
+        return base[: -len("/public")]
+    if base.endswith("/v1"):
+        return base[: -len("/v1")]
+    return base
+
+
 def _normalize_model_reference(value: str | None) -> str | None:
     text = str(value or "").strip()
     if not text:
@@ -241,14 +254,14 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=int(_env("LLAMA_PORT", "8080")))
     parser.add_argument("--heartbeat-seconds", type=float, default=float(_env("LLM_WORKER_HEARTBEAT_SECONDS", "15")))
     parser.add_argument("--startup-timeout-seconds", type=float, default=float(_env("LLM_WORKER_STARTUP_TIMEOUT_SECONDS", "300")))
-    parser.add_argument("--supports-image-inputs", action="store_true", default=_env("LLAMA_SUPPORTS_IMAGE_INPUTS", "0") == "1")
+    parser.add_argument("--supports-image-inputs", action="store_true", default=_env("LLAMA_SUPPORTS_IMAGE_INPUTS", "1") == "1")
     parser.add_argument("--max-concurrent", type=int, default=int(_env("LLAMA_MAX_CONCURRENCY", str(DEFAULT_VLLM_MAX_CONCURRENCY))))
     parser.add_argument("--transport-mode", choices=["direct-endpoint", "pull-request"], default=_env("LLM_WORKER_TRANSPORT_MODE", "pull-request"))
     parser.add_argument("--test-mode", action="store_true", default=_env("LLM_WORKER_TEST_MODE", "0") == "1")
     parser.add_argument("--request-poll-seconds", type=float, default=float(_env("LLM_WORKER_REQUEST_POLL_SECONDS", "1.0")))
     args = parser.parse_args()
 
-    router_url = (args.router_url or "").strip().rstrip("/")
+    router_url = _normalize_router_url(args.router_url or "")
     if not router_url:
         raise SystemExit("Set --router-url or LLM_ROUTER_URL.")
 

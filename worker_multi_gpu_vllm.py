@@ -123,7 +123,7 @@ def _worker_command(*, port: int, display_name: str, public_base_url: str | None
     model_name = _env("LLAMA_MODEL_NAME")
     if model_name:
         command.extend(["--model-name", model_name])
-    supports_images = _env("LLAMA_SUPPORTS_IMAGE_INPUTS", "0")
+    supports_images = _env("LLAMA_SUPPORTS_IMAGE_INPUTS", "1")
     if supports_images == "1":
         command.append("--supports-image-inputs")
     return command
