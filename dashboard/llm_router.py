@@ -4,7 +4,7 @@ import asyncio
 import time
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Literal
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 import math
 
 import httpx
@@ -681,6 +681,8 @@ class DashboardLLMRouter:
             if not self._models_probe_body_has_models_list(body):
                 raise RuntimeError("Upstream health probe did not return a models list")
             runtime.max_context_tokens = self._infer_runtime_context_tokens(runtime, body)
+            if runtime.max_context_tokens is None:
+                runtime.max_context_tokens = await self._probe_runtime_context_tokens_from_props(runtime)
             runtime.health_probe_failures = 0
             runtime.last_healthy_at = self._time_fn()
             await self.set_connection_active(runtime.config.connection_id, active=True, last_error=None)
@@ -1156,6 +1158,52 @@ class DashboardLLMRouter:
         if parsed <= 0:
             return None
         return parsed
+
+    @classmethod
+    async def _probe_runtime_context_tokens_from_props(
+        cls,
+        runtime: _ConnectionRuntime,
+    ) -> int | None:
+        if cls._uses_pull_worker_transport(runtime.config):
+            return runtime.max_context_tokens
+        props_url = cls._props_probe_url(runtime.config)
+        try:
+            response = await runtime.client.get(props_url, timeout=5.0)
+            response.raise_for_status()
+            body = response.json()
+            parsed = cls._extract_context_tokens_from_props_body(body)
+            if parsed is not None:
+                return parsed
+        except Exception:
+            return runtime.max_context_tokens
+        return runtime.max_context_tokens
+
+    @staticmethod
+    def _props_probe_url(config: LLMRouterConnectionConfig) -> str:
+        parsed = urlparse(config.base_url.rstrip("/"))
+        path = parsed.path or ""
+        if path.endswith("/v1"):
+            path = path[: -len("/v1")]
+        if not path:
+            path = "/props"
+        else:
+            path = f"{path.rstrip('/')}/props"
+        rebuilt = parsed._replace(path=path, params="", query="", fragment="")
+        return urlunparse(rebuilt)
+
+    @classmethod
+    def _extract_context_tokens_from_props_body(cls, body: object) -> int | None:
+        if not isinstance(body, dict):
+            return None
+        direct = cls._extract_context_tokens_from_model_record(body)
+        if direct is not None:
+            return direct
+        defaults = body.get("default_generation_settings")
+        if isinstance(defaults, dict):
+            nested = cls._extract_context_tokens_from_model_record(defaults)
+            if nested is not None:
+                return nested
+        return None
 
     @staticmethod
     def _payload_requires_image_inputs(payload: dict[str, Any]) -> bool:

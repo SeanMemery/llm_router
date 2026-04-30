@@ -357,3 +357,14 @@ def test_extract_context_tokens_from_meta_n_ctx_train() -> None:
     }
     parsed = DashboardLLMRouter._extract_context_tokens_from_model_record(record)
     assert parsed == 262144
+
+
+def test_extract_context_tokens_from_props_payload() -> None:
+    props = {
+        "default_generation_settings": {
+            "n_ctx": 16128,
+            "params": {"max_tokens": -1},
+        }
+    }
+    parsed = DashboardLLMRouter._extract_context_tokens_from_props_body(props)
+    assert parsed == 16128
