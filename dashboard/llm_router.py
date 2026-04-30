@@ -172,6 +172,7 @@ class LLMRouterConnectionSnapshot(BaseModel):
     waiting_requests: int = 0
     last_error: str | None = None
     usage_percentage: float | None = None
+    max_context_tokens: int | None = None
     telemetry: LLMRouterTelemetry = Field(default_factory=LLMRouterTelemetry)
 
 
@@ -246,6 +247,7 @@ class _ConnectionRuntime:
     busy_window_started_at: float | None = None
     telemetry: LLMRouterTelemetry = field(default_factory=LLMRouterTelemetry)
     canonical_model: str = ""
+    max_context_tokens: int | None = None
 
 
 class DashboardLLMRouter:
@@ -301,6 +303,7 @@ class DashboardLLMRouter:
                 if prior is not None
                 else LLMRouterTelemetry(),
                 canonical_model=canonical,
+                max_context_tokens=prior.max_context_tokens if prior is not None else None,
             )
             self._connections.append(runtime)
 
@@ -350,6 +353,7 @@ class DashboardLLMRouter:
                     waiting_requests=self._waiting_requests,
                     last_error=runtime.last_error,
                     usage_percentage=self._runtime_usage_percentage(runtime, now=now),
+                    max_context_tokens=runtime.max_context_tokens,
                     telemetry=runtime.telemetry.model_copy(deep=True),
                 )
                 for runtime in self._connections
@@ -399,6 +403,7 @@ class DashboardLLMRouter:
                     if prior is not None
                     else LLMRouterTelemetry(),
                     canonical_model=canonical,
+                    max_context_tokens=prior.max_context_tokens if prior is not None else None,
                 )
             )
         clients_to_close.extend(runtime.client for runtime in prior_by_id.values())
@@ -472,6 +477,7 @@ class DashboardLLMRouter:
                         "active": connection.active,
                         "manually_disabled": connection.manually_disabled,
                         "supports_image_inputs": connection.supports_image_inputs,
+                        "max_context_tokens": connection.max_context_tokens,
                     },
                 }
                 for connection in available_connections
@@ -503,14 +509,30 @@ class DashboardLLMRouter:
             requested_model = None
             canonical_requested = None
         requires_image_inputs = self._payload_requires_image_inputs(outbound_payload)
+        required_total_tokens = self._estimate_required_total_tokens(outbound_payload)
         canonical_requested = (
             normalize_canonical_model_name(requested_model) if requested_model else None
         )
+        if not self._has_any_capacity_candidate(
+            requires_image_inputs=requires_image_inputs,
+            requested_model=requested_model or canonical_requested,
+            required_total_tokens=required_total_tokens,
+        ):
+            known_max_context = self._max_known_context_tokens(
+                requires_image_inputs=requires_image_inputs,
+                requested_model=requested_model or canonical_requested,
+            )
+            if known_max_context is not None:
+                raise NoActiveLLMConnectionError(
+                    "Dashboard LLM router has no active backend connection with sufficient context "
+                    f"(estimated_required_tokens={required_total_tokens}, max_available_context={known_max_context})."
+                )
         attempts = max(
             1 + self._transient_failure_retries,
             self._active_runtime_count(
                 requires_image_inputs=requires_image_inputs,
                 requested_model=requested_model or canonical_requested,
+                required_total_tokens=required_total_tokens,
             ),
         )
         last_exc: Exception | None = None
@@ -520,6 +542,7 @@ class DashboardLLMRouter:
                 avoid_connection_ids=failed_connection_ids,
                 requires_image_inputs=requires_image_inputs,
                 requested_model=requested_model or canonical_requested,
+                required_total_tokens=required_total_tokens,
             )
             concurrent_requests_seen = runtime.in_flight_requests
             request_started_at = self._time_fn()
@@ -589,6 +612,7 @@ class DashboardLLMRouter:
                             failed_connection_ids,
                             requires_image_inputs=requires_image_inputs,
                             requested_model=requested_model,
+                            required_total_tokens=required_total_tokens,
                         )
                     ):
                         continue
@@ -611,6 +635,7 @@ class DashboardLLMRouter:
                             failed_connection_ids,
                             requires_image_inputs=requires_image_inputs,
                             requested_model=requested_model,
+                            required_total_tokens=required_total_tokens,
                         )
                     ):
                         continue
@@ -655,6 +680,7 @@ class DashboardLLMRouter:
             body = response.json()
             if not self._models_probe_body_has_models_list(body):
                 raise RuntimeError("Upstream health probe did not return a models list")
+            runtime.max_context_tokens = self._infer_runtime_context_tokens(runtime, body)
             runtime.health_probe_failures = 0
             runtime.last_healthy_at = self._time_fn()
             await self.set_connection_active(runtime.config.connection_id, active=True, last_error=None)
@@ -719,6 +745,7 @@ class DashboardLLMRouter:
         avoid_connection_ids: set[str] | None = None,
         requires_image_inputs: bool = False,
         requested_model: str | None = None,
+        required_total_tokens: int | None = None,
     ) -> _ConnectionRuntime:
         no_active_deadline = self._time_fn() + self._no_active_connection_timeout_seconds
         avoided = set(avoid_connection_ids or ())
@@ -727,6 +754,7 @@ class DashboardLLMRouter:
                 available = self._available_runtimes(
                     requires_image_inputs=requires_image_inputs,
                     requested_model=requested_model,
+                    required_total_tokens=required_total_tokens,
                 )
                 if available:
                     preferred = [
@@ -755,6 +783,10 @@ class DashboardLLMRouter:
                         runtime.active
                         and (runtime.config.supports_image_inputs or not requires_image_inputs)
                         and (requested_model is None or runtime.config.model == requested_model)
+                        and self._runtime_meets_context_requirement(
+                            runtime,
+                            required_total_tokens=required_total_tokens,
+                        )
                         for runtime in self._connections
                     ):
                         await self._condition.wait()
@@ -822,6 +854,7 @@ class DashboardLLMRouter:
         *,
         requires_image_inputs: bool = False,
         requested_model: str | None = None,
+        required_total_tokens: int | None = None,
     ) -> list[_ConnectionRuntime]:
         base_candidates = [
             runtime
@@ -846,7 +879,14 @@ class DashboardLLMRouter:
                     if runtime.canonical_model == canonical_requested
                 ]
         if requested_model is not None:
-            return candidates
+            return self._filter_runtimes_by_context(
+                candidates,
+                required_total_tokens=required_total_tokens,
+            )
+        candidates = self._filter_runtimes_by_context(
+            candidates,
+            required_total_tokens=required_total_tokens,
+        )
         # For no-model requests, prefer least busy; tie-break by best recent tok/s
         return sorted(
             candidates,
@@ -863,6 +903,7 @@ class DashboardLLMRouter:
         *,
         requires_image_inputs: bool = False,
         requested_model: str | None = None,
+        required_total_tokens: int | None = None,
     ) -> int:
         return sum(
             1
@@ -870,6 +911,10 @@ class DashboardLLMRouter:
             if runtime.active
             and (runtime.config.supports_image_inputs or not requires_image_inputs)
             and (requested_model is None or runtime.config.model == requested_model)
+            and self._runtime_meets_context_requirement(
+                runtime,
+                required_total_tokens=required_total_tokens,
+            )
         )
 
     def _has_alternative_active_runtime(
@@ -878,14 +923,238 @@ class DashboardLLMRouter:
         *,
         requires_image_inputs: bool = False,
         requested_model: str | None = None,
+        required_total_tokens: int | None = None,
     ) -> bool:
         return any(
             runtime.active
             and runtime.config.connection_id not in excluded_connection_ids
             and (runtime.config.supports_image_inputs or not requires_image_inputs)
             and (requested_model is None or runtime.config.model == requested_model)
+            and self._runtime_meets_context_requirement(
+                runtime,
+                required_total_tokens=required_total_tokens,
+            )
             for runtime in self._connections
         )
+
+    @staticmethod
+    def _extract_completion_budget_tokens(payload: dict[str, Any]) -> int:
+        for key in ("max_completion_tokens", "max_tokens"):
+            value = payload.get(key)
+            if value is None:
+                continue
+            try:
+                return max(GLOBAL_MIN_COMPLETION_TOKENS, int(value))
+            except (TypeError, ValueError):
+                continue
+        return GLOBAL_MIN_COMPLETION_TOKENS
+
+    @classmethod
+    def _estimate_prompt_tokens(cls, payload: dict[str, Any]) -> int:
+        try:
+            prompt_like: dict[str, Any] = {}
+            for key in (
+                "messages",
+                "tools",
+                "functions",
+                "function_call",
+                "response_format",
+                "input",
+            ):
+                if key in payload:
+                    prompt_like[key] = payload[key]
+            serialized = str(prompt_like)
+            estimated = int(math.ceil(len(serialized) / 4.0))
+            # Heuristic image overhead for VLMs.
+            image_items = 0
+            messages = payload.get("messages")
+            if isinstance(messages, list):
+                for message in messages:
+                    if not isinstance(message, dict):
+                        continue
+                    content = message.get("content")
+                    if isinstance(content, list):
+                        for item in content:
+                            if not isinstance(item, dict):
+                                continue
+                            item_type = str(item.get("type") or "").strip().lower()
+                            if item_type in {"image_url", "input_image", "image"}:
+                                image_items += 1
+            estimated += image_items * 2048
+            return max(1, estimated)
+        except Exception:
+            return GLOBAL_MIN_COMPLETION_TOKENS
+
+    @classmethod
+    def _estimate_required_total_tokens(cls, payload: dict[str, Any]) -> int:
+        completion_budget = cls._extract_completion_budget_tokens(payload)
+        prompt_tokens = cls._estimate_prompt_tokens(payload)
+        return max(1, prompt_tokens + completion_budget)
+
+    @staticmethod
+    def _runtime_meets_context_requirement(
+        runtime: _ConnectionRuntime,
+        *,
+        required_total_tokens: int | None,
+    ) -> bool:
+        if required_total_tokens is None:
+            return True
+        if runtime.max_context_tokens is None:
+            return True
+        return runtime.max_context_tokens >= required_total_tokens
+
+    @classmethod
+    def _filter_runtimes_by_context(
+        cls,
+        runtimes: list[_ConnectionRuntime],
+        *,
+        required_total_tokens: int | None,
+    ) -> list[_ConnectionRuntime]:
+        if required_total_tokens is None:
+            return list(runtimes)
+        known = [runtime for runtime in runtimes if runtime.max_context_tokens is not None]
+        if not known:
+            return list(runtimes)
+        fitting = [
+            runtime
+            for runtime in known
+            if runtime.max_context_tokens is not None and runtime.max_context_tokens >= required_total_tokens
+        ]
+        return fitting
+
+    def _has_any_capacity_candidate(
+        self,
+        *,
+        requires_image_inputs: bool,
+        requested_model: str | None,
+        required_total_tokens: int | None,
+    ) -> bool:
+        candidates = [
+            runtime
+            for runtime in self._connections
+            if runtime.active
+            and (runtime.config.supports_image_inputs or not requires_image_inputs)
+            and (requested_model is None or runtime.config.model == requested_model or runtime.canonical_model == normalize_canonical_model_name(requested_model))
+        ]
+        return bool(
+            self._filter_runtimes_by_context(
+                candidates,
+                required_total_tokens=required_total_tokens,
+            )
+        )
+
+    def _max_known_context_tokens(
+        self,
+        *,
+        requires_image_inputs: bool,
+        requested_model: str | None,
+    ) -> int | None:
+        known_values = [
+            runtime.max_context_tokens
+            for runtime in self._connections
+            if runtime.active
+            and runtime.max_context_tokens is not None
+            and (runtime.config.supports_image_inputs or not requires_image_inputs)
+            and (requested_model is None or runtime.config.model == requested_model or runtime.canonical_model == normalize_canonical_model_name(requested_model))
+        ]
+        if not known_values:
+            return None
+        return max(int(value) for value in known_values if value is not None)
+
+    @classmethod
+    def _infer_runtime_context_tokens(
+        cls,
+        runtime: _ConnectionRuntime,
+        models_body: object,
+    ) -> int | None:
+        records = cls._models_probe_records(models_body)
+        if not records:
+            return runtime.max_context_tokens
+        exact: list[int] = []
+        fallback: list[int] = []
+        runtime_model = str(runtime.config.model or "")
+        runtime_canonical = normalize_canonical_model_name(runtime_model)
+        for record in records:
+            context_tokens = cls._extract_context_tokens_from_model_record(record)
+            if context_tokens is None:
+                continue
+            fallback.append(context_tokens)
+            names = cls._model_record_names(record)
+            if runtime_model in names:
+                exact.append(context_tokens)
+                continue
+            canonical_names = [normalize_canonical_model_name(name) for name in names]
+            if runtime_canonical and runtime_canonical in canonical_names:
+                exact.append(context_tokens)
+        if exact:
+            return max(exact)
+        if fallback:
+            return max(fallback)
+        return runtime.max_context_tokens
+
+    @staticmethod
+    def _models_probe_records(models_body: object) -> list[dict[str, Any]]:
+        if isinstance(models_body, list):
+            return [item for item in models_body if isinstance(item, dict)]
+        if isinstance(models_body, dict):
+            data = models_body.get("data")
+            if isinstance(data, list):
+                return [item for item in data if isinstance(item, dict)]
+            models = models_body.get("models")
+            if isinstance(models, list):
+                return [item for item in models if isinstance(item, dict)]
+        return []
+
+    @staticmethod
+    def _model_record_names(record: dict[str, Any]) -> list[str]:
+        names: list[str] = []
+        for key in ("id", "name", "model"):
+            value = record.get(key)
+            if isinstance(value, str) and value.strip():
+                names.append(value.strip())
+        return names
+
+    @classmethod
+    def _extract_context_tokens_from_model_record(
+        cls,
+        record: dict[str, Any],
+    ) -> int | None:
+        candidate_keys = (
+            "context_length",
+            "max_context_length",
+            "max_model_len",
+            "max_sequence_length",
+            "max_seq_len",
+            "max_position_embeddings",
+            "n_ctx",
+            "num_ctx",
+            "context_window",
+        )
+        search_spaces: list[dict[str, Any]] = [record]
+        for nested_key in ("metadata", "details", "model_info", "capabilities"):
+            nested = record.get(nested_key)
+            if isinstance(nested, dict):
+                search_spaces.append(nested)
+        extracted: list[int] = []
+        for space in search_spaces:
+            for key in candidate_keys:
+                value = space.get(key)
+                parsed = cls._parse_positive_int(value)
+                if parsed is not None:
+                    extracted.append(parsed)
+        if not extracted:
+            return None
+        return max(extracted)
+
+    @staticmethod
+    def _parse_positive_int(value: Any) -> int | None:
+        try:
+            parsed = int(str(value).strip())
+        except Exception:
+            return None
+        if parsed <= 0:
+            return None
+        return parsed
 
     @staticmethod
     def _payload_requires_image_inputs(payload: dict[str, Any]) -> bool:

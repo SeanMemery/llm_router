@@ -7,11 +7,14 @@ import importlib.util
 import json
 import os
 import re
+import secrets
 import signal
 import subprocess
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -44,6 +47,12 @@ from modal_worker_store import (
     save_modal_worker_launches,
 )
 from paths import ArtifactLayout, get_artifact_layout
+from vast_instance_store import (
+    VastInstanceRecord,
+    VastInstanceStatus,
+    load_vast_instance,
+    save_vast_instance,
+)
 from worker_registry import (
     LLMWorkerDisconnectRequest,
     LLMWorkerHeartbeatRequest,
@@ -74,13 +83,39 @@ ROUTER_REQUEST_LOG_MAX_ENTRIES = max(
     100,
     int(os.getenv("ROUTER_REQUEST_LOG_MAX_ENTRIES", "1000")),
 )
-DEFAULT_MODAL_WORKER_MODEL = "Qwen/Qwen3.6-35B-A3B-FP8"
+DEFAULT_MODAL_WORKER_MODEL = "RedHatAI/Qwen3.6-35B-A3B-NVFP4"
 DEFAULT_MODAL_WORKER_MODELS = (
     DEFAULT_MODAL_WORKER_MODEL,
+    "Qwen/Qwen3.6-35B-A3B-FP8",
     "Qwen/Qwen2.5-32B-Instruct",
     "meta-llama/Llama-3.3-70B-Instruct",
     "Qwen/Qwen2.5-Coder-32B-Instruct",
 )
+DEFAULT_VAST_MODEL = "RedHatAI/Qwen3.6-35B-A3B-NVFP4"
+DEFAULT_VAST_SERVED_MODEL_NAME = "Qwen3.6-35B-A3B-UD-Q4_K_M"
+DEFAULT_VAST_INSTANCE_LABEL = "llm-router-vast-qwen36"
+DEFAULT_VAST_IMAGE = "vllm/vllm-openai:latest"
+DEFAULT_VAST_ENDPOINT_PORT = 8000
+DEFAULT_VAST_DISK_GB = 120
+DEFAULT_VAST_MAX_MODEL_LEN = 2048
+DEFAULT_VAST_GPU_MEMORY_UTILIZATION = 0.72
+DEFAULT_VAST_MAX_CONCURRENT = 8
+DEFAULT_VAST_ENDPOINT_PRIORITY = 1
+DEFAULT_VAST_REASONING_PARSER = "qwen3"
+DEFAULT_VAST_MOE_BACKEND = "flashinfer_cutlass"
+DEFAULT_VAST_STARTUP_GRACE_SECONDS = 900
+DEFAULT_VAST_SEARCH_QUERY = (
+    "reliability > 0.99 rented=False rentable=True verified=True "
+    "gpu_name=RTX_3090 num_gpus=1 disk_space>120 direct_port_count>=8 "
+    "geolocation in [US,CA,GB,DE,NL,FR,BE,ES,PL]"
+)
+DEFAULT_VAST_SEARCH_ORDER = "dph_total"
+DEFAULT_VAST_DENYLISTED_HOST_IDS = {44511, 155125, 51981}
+DEFAULT_VAST_PREFERRED_HOST_IDS = {228989, 148689, 51981, 67245}
+DEFAULT_VAST_MANAGED_BASE_URLS = {
+    "http://209.146.116.50:36413",
+    "http://209.146.116.50:36468",
+}
 MODAL_APP_STATUS_CACHE_TTL_SECONDS = max(
     5.0,
     float(os.getenv("MODAL_APP_STATUS_CACHE_TTL_SECONDS", "15")),
@@ -487,6 +522,321 @@ def _reconcile_modal_worker_launches(
     return sorted(updated, key=lambda item: item.started_at, reverse=True)
 
 
+def _run_vast_command(*args: str, timeout_seconds: float = 120.0) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["vastai", *args],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=timeout_seconds,
+    )
+
+
+def _parse_vast_json(result: subprocess.CompletedProcess[str]) -> Any:
+    if result.returncode != 0:
+        output = "\n".join(part for part in ((result.stdout or "").strip(), (result.stderr or "").strip()) if part)
+        raise RuntimeError(output or f"vastai exited with status {result.returncode}")
+    text = (result.stdout or "").strip()
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Failed to parse vastai JSON output: {exc}") from exc
+
+
+def _vast_onstart_command(*, model: str, served_model_name: str, api_key: str) -> str:
+    return (
+        "bash -lc 'set -euo pipefail; "
+        "mkdir -p /workspace/logs /workspace/hf-cache; "
+        "export HF_HOME=/workspace/hf-cache; "
+        "export HF_HUB_ENABLE_HF_TRANSFER=1; "
+        "export CUDA_MODULE_LOADING=LAZY; "
+        "vllm serve "
+        f"{model} "
+        "--host 0.0.0.0 "
+        f"--port {DEFAULT_VAST_ENDPOINT_PORT} "
+        f"--served-model-name {served_model_name} "
+        f"--max-model-len {DEFAULT_VAST_MAX_MODEL_LEN} "
+        f"--gpu-memory-utilization {DEFAULT_VAST_GPU_MEMORY_UTILIZATION:.2f} "
+        f"--reasoning-parser {DEFAULT_VAST_REASONING_PARSER} "
+        f"--moe-backend {DEFAULT_VAST_MOE_BACKEND} "
+        "--enforce-eager "
+        f"--api-key {api_key} "
+        "2>&1 | tee /workspace/logs/vllm.log'"
+    )
+
+
+def _vast_endpoint_base_url(record: VastInstanceRecord) -> str | None:
+    if not record.public_ipaddr:
+        return None
+    return f"http://{record.public_ipaddr}:{record.endpoint_port}"
+
+
+def _vast_published_endpoint_port(payload: dict[str, Any], default_port: int) -> int:
+    ports = payload.get("ports")
+    if not isinstance(ports, dict):
+        return default_port
+    candidates = ports.get(f"{default_port}/tcp")
+    if not isinstance(candidates, list):
+        return default_port
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        raw_host_port = item.get("HostPort")
+        if isinstance(raw_host_port, str) and raw_host_port.isdigit():
+            return int(raw_host_port)
+        if isinstance(raw_host_port, int | float):
+            return int(raw_host_port)
+    return default_port
+
+
+def _known_vast_base_urls(record: VastInstanceRecord | None) -> set[str]:
+    urls = set(DEFAULT_VAST_MANAGED_BASE_URLS)
+    if record is None:
+        return urls
+    if isinstance(record.base_url, str) and record.base_url.strip():
+        urls.add(record.base_url.strip())
+    previous_base_urls = record.metadata.get("previous_base_urls")
+    if isinstance(previous_base_urls, list):
+        for item in previous_base_urls:
+            if isinstance(item, str) and item.strip():
+                urls.add(item.strip())
+    return urls
+
+
+def _probe_vast_endpoint(*, base_url: str, api_key: str | None, timeout_seconds: float = 6.0) -> str | None:
+    headers: dict[str, str] = {}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    for path in ("/health", "/v1/models"):
+        request = urllib.request.Request(f"{base_url}{path}", headers=headers)
+        try:
+            with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+                if 200 <= response.status < 500:
+                    return None
+        except urllib.error.HTTPError as exc:
+            if 200 <= exc.code < 500:
+                return None
+            return f"{path}: HTTP {exc.code}"
+        except Exception as exc:  # noqa: BLE001
+            return f"{path}: {exc}"
+    return "No healthy Vast endpoint probe succeeded"
+
+
+def _vast_instance_payload(record: VastInstanceRecord | None) -> dict[str, Any]:
+    if record is None:
+        return {
+            "configured": False,
+            "status": "missing",
+            "status_label": "Not started",
+            "status_class": "failed",
+            "model": DEFAULT_VAST_MODEL,
+            "served_model_name": DEFAULT_VAST_SERVED_MODEL_NAME,
+            "endpoint_port": DEFAULT_VAST_ENDPOINT_PORT,
+        }
+    status_map = {
+        VastInstanceStatus.running: ("Running", "running"),
+        VastInstanceStatus.starting: ("Starting", "failed"),
+        VastInstanceStatus.stopping: ("Stopping", "failed"),
+        VastInstanceStatus.stopped: ("Stopped", "failed"),
+        VastInstanceStatus.failed: ("Failed", "failed"),
+        VastInstanceStatus.missing: ("Missing", "failed"),
+    }
+    status_label, status_class = status_map.get(record.status, ("Unknown", "failed"))
+    ssh_command = None
+    if record.direct_ssh_host and record.direct_ssh_port:
+        ssh_command = f"ssh -p {record.direct_ssh_port} root@{record.direct_ssh_host}"
+    elif record.ssh_host and record.ssh_port:
+        ssh_command = f"ssh -p {record.ssh_port} root@{record.ssh_host}"
+    return {
+        "configured": True,
+        "instance_id": record.instance_id,
+        "offer_id": record.offer_id,
+        "label": record.label,
+        "status": record.status.value,
+        "status_label": status_label,
+        "status_class": status_class,
+        "model": record.model,
+        "served_model_name": record.served_model_name,
+        "endpoint_port": record.endpoint_port,
+        "base_url": record.base_url,
+        "public_ipaddr": record.public_ipaddr,
+        "ssh_host": record.ssh_host,
+        "ssh_port": record.ssh_port,
+        "direct_ssh_host": record.direct_ssh_host,
+        "direct_ssh_port": record.direct_ssh_port,
+        "ssh_command": ssh_command,
+        "last_error": record.last_error,
+        "known_base_urls": sorted(_known_vast_base_urls(record)),
+        "updated_at": record.updated_at.isoformat(),
+    }
+
+
+def _upsert_vast_router_connection(
+    *,
+    existing: list[LLMRouterConnectionConfig],
+    record: VastInstanceRecord,
+) -> list[LLMRouterConnectionConfig]:
+    if not record.base_url:
+        return [item.model_copy(deep=True) for item in existing]
+    filtered = [
+        item.model_copy(deep=True)
+        for item in existing
+        if not (
+            item.source_kind == "manual"
+            and (
+                item.connection_id == "vast-managed"
+                or item.base_url == record.base_url
+            )
+        )
+    ]
+    filtered.append(
+        LLMRouterConnectionConfig(
+            connection_id="vast-managed",
+            base_url=record.base_url,
+            model=record.served_model_name,
+            api_key=record.api_key,
+            starred=False,
+            priority=DEFAULT_VAST_ENDPOINT_PRIORITY,
+            source_kind="manual",
+            max_concurrent_requests=DEFAULT_VAST_MAX_CONCURRENT,
+            supports_image_inputs=True,
+        )
+    )
+    return filtered
+
+
+def _remove_vast_router_connection(existing: list[LLMRouterConnectionConfig]) -> list[LLMRouterConnectionConfig]:
+    return [
+        item.model_copy(deep=True)
+        for item in existing
+        if not (item.source_kind == "manual" and item.connection_id == "vast-managed")
+    ]
+
+
+def _upsert_vast_endpoint_record(
+    endpoint_records: list[dict[str, Any]],
+    *,
+    record: VastInstanceRecord,
+    base_url: str,
+    api_key: str | None,
+    active: bool,
+    last_error: str | None,
+) -> list[dict[str, Any]]:
+    known_base_urls = _known_vast_base_urls(record)
+    filtered = [
+        item
+        for item in endpoint_records
+        if item.get("base_url") not in known_base_urls or item.get("base_url") == base_url
+    ]
+    filtered = [item for item in filtered if item.get("base_url") != base_url]
+    filtered.append(
+        {
+            "base_url": base_url,
+            "api_key": api_key,
+            "starred": False,
+            "priority": DEFAULT_VAST_ENDPOINT_PRIORITY,
+            "active": active,
+            "manually_disabled": False,
+            "last_error": _coerce_optional(last_error),
+        }
+    )
+    return filtered
+
+
+def _remove_vast_endpoint_record(
+    endpoint_records: list[dict[str, Any]],
+    *,
+    record: VastInstanceRecord | None = None,
+    base_url: str | None,
+) -> list[dict[str, Any]]:
+    known_base_urls = _known_vast_base_urls(record)
+    if base_url:
+        known_base_urls.add(base_url)
+    if not known_base_urls:
+        return list(endpoint_records)
+    return [item for item in endpoint_records if item.get("base_url") not in known_base_urls]
+
+
+def _reconcile_vast_instance_state(*, layout: ArtifactLayout) -> VastInstanceRecord | None:
+    record = load_vast_instance(layout)
+    if record is None or record.instance_id is None:
+        return record
+    try:
+        payload = _parse_vast_json(_run_vast_command("show", "instance", str(record.instance_id), "--raw"))
+    except Exception as exc:  # noqa: BLE001
+        next_status = VastInstanceStatus.failed
+        detail = str(exc).strip()
+        lowered = detail.lower()
+        if "not found" in lowered or "404" in lowered:
+            next_status = VastInstanceStatus.missing
+        record = record.model_copy(
+            update={
+                "status": next_status,
+                "last_error": detail or record.last_error,
+                "updated_at": datetime.now(timezone.utc),
+            }
+        )
+        save_vast_instance(layout, record)
+        return record
+    if not isinstance(payload, dict):
+        return record
+    actual_status = _coerce_optional(payload.get("actual_status"))
+    cur_state = _coerce_optional(payload.get("cur_state")) or ""
+    next_status = record.status
+    last_error = None
+    if cur_state.lower() == "stopped":
+        next_status = VastInstanceStatus.stopped
+    elif actual_status and actual_status.lower() == "running":
+        next_status = VastInstanceStatus.running
+    elif cur_state.lower() == "running":
+        next_status = VastInstanceStatus.starting
+    status_msg = _coerce_optional(payload.get("status_msg"))
+    if status_msg and next_status != VastInstanceStatus.running:
+        last_error = status_msg
+    public_ipaddr = _coerce_optional(payload.get("public_ipaddr"))
+    direct_ssh_port = payload.get("machine_dir_ssh_port")
+    ssh_port = payload.get("ssh_port")
+    published_endpoint_port = _vast_published_endpoint_port(payload, record.endpoint_port)
+    base_url = f"http://{public_ipaddr}:{published_endpoint_port}" if public_ipaddr else None
+    if base_url and next_status == VastInstanceStatus.running:
+        probe_error = _probe_vast_endpoint(base_url=base_url, api_key=record.api_key)
+        if probe_error is None:
+            last_error = None
+        else:
+            last_error = probe_error
+            age_seconds = max(0.0, (datetime.now(timezone.utc) - record.created_at).total_seconds())
+            next_status = (
+                VastInstanceStatus.failed
+                if age_seconds >= DEFAULT_VAST_STARTUP_GRACE_SECONDS
+                else VastInstanceStatus.starting
+            )
+    record = record.model_copy(
+        update={
+            "base_url": base_url,
+            "public_ipaddr": public_ipaddr,
+            "ssh_host": _coerce_optional(payload.get("ssh_host")),
+            "ssh_port": int(ssh_port) if isinstance(ssh_port, int | float) and ssh_port else record.ssh_port,
+            "direct_ssh_host": public_ipaddr,
+            "direct_ssh_port": int(direct_ssh_port) if isinstance(direct_ssh_port, int | float) and direct_ssh_port else record.direct_ssh_port,
+            "status": next_status,
+            "last_error": last_error,
+            "updated_at": datetime.now(timezone.utc),
+            "metadata": {
+                **record.metadata,
+                "actual_status": actual_status,
+                "cur_state": cur_state,
+                "published_endpoint_port": published_endpoint_port,
+                "status_msg": status_msg,
+                "endpoint_probe_error": last_error,
+            },
+        }
+    )
+    save_vast_instance(layout, record)
+    return record
+
+
 def _redirect_with_error(next_url: str, message: str) -> RedirectResponse:
     parsed = urlparse(next_url or "/")
     query = parse_qs(parsed.query, keep_blank_values=True)
@@ -841,6 +1191,13 @@ def _log_router_request_error(
     try:
         path = _router_error_log_path(layout)
         path.parent.mkdir(parents=True, exist_ok=True)
+        upstream_request_seconds = router_metadata.get("request_duration_seconds")
+        if not isinstance(upstream_request_seconds, (int, float)):
+            upstream_request_seconds = None
+        end_to_end_request_seconds = max((completed_at - started_at).total_seconds(), 0.0)
+        queue_wait_seconds = None
+        if upstream_request_seconds is not None:
+            queue_wait_seconds = max(end_to_end_request_seconds - float(upstream_request_seconds), 0.0)
         entry = {
             "timestamp": datetime.utcnow().isoformat() + "Z",
             "error": str(error),
@@ -1296,10 +1653,6 @@ def _serialize_router_panel_payload(panel: dict[str, Any]) -> dict[str, Any]:
         worker.model_dump(mode="json") if hasattr(worker, "model_dump") else dict(worker)
         for worker in panel.get("workers", [])
     ]
-    serialized["modal_launches"] = [
-        launch.model_dump(mode="json") if hasattr(launch, "model_dump") else dict(launch)
-        for launch in panel.get("modal_launches", [])
-    ]
     serialized_endpoints: list[dict[str, Any]] = []
     for endpoint in panel.get("endpoints", []):
         item = dict(endpoint)
@@ -1319,7 +1672,6 @@ def _router_panel_payload(
     snapshot: LLMRouterSnapshot,
     workers: list[LLMWorkerRecord],
     public_access: dict[str, Any],
-    modal_launches: list[ModalWorkerLaunchRecord],
     endpoint_records: list[dict[str, Any]] | None = None,
     error: str | None = None,
     error_count: int = 0,
@@ -1359,8 +1711,6 @@ def _router_panel_payload(
             "offline": 0,
             "total": len(online_workers),
         },
-        "modal_launches": modal_launches,
-        "modal_model_options": _modal_worker_model_options(),
         "waiting_requests": snapshot.waiting_requests,
         **overview_metrics,
         "rendered_at": datetime.now().strftime("%H:%M:%S"),
@@ -1440,6 +1790,9 @@ def create_router_app(*, layout: ArtifactLayout | None = None) -> FastAPI:
     worker_request_queue = WorkerRequestQueue()
     endpoint_records = load_llm_router_endpoint_records(resolved_layout)
     manual_router_connections = _serialize_manual_router_connections(router_snapshot)
+    manual_router_connections[:] = _remove_vast_router_connection(manual_router_connections)
+    endpoint_records[:] = _remove_vast_endpoint_record(endpoint_records, base_url=None)
+    save_llm_router_endpoint_records(resolved_layout, endpoint_records)
 
     async def _handle_pull_worker_request(
         config: LLMRouterConnectionConfig,
@@ -1451,7 +1804,7 @@ def create_router_app(*, layout: ArtifactLayout | None = None) -> FastAPI:
         request_id, body = await worker_request_queue.enqueue_and_wait(
             worker_id=worker_id,
             payload=payload,
-            timeout_seconds=300.0,
+            timeout_seconds=600.0,
         )
         router_metadata = body.get("router")
         if not isinstance(router_metadata, dict):
@@ -1481,7 +1834,7 @@ def create_router_app(*, layout: ArtifactLayout | None = None) -> FastAPI:
             *worker_registry.active_connection_configs(),
         ],
         initial_snapshot=router_snapshot,
-        timeout_seconds=300.0,
+        timeout_seconds=600.0,
         worker_request_handler=_handle_pull_worker_request,
     )
     shared_llm = load_shared_llm_config(resolved_layout.config_root / "LLM.yaml")
@@ -1532,7 +1885,6 @@ def create_router_app(*, layout: ArtifactLayout | None = None) -> FastAPI:
             snapshot=dashboard_llm_router.snapshot(),
             workers=workers,
             public_access=_router_public_access_payload(resolved_layout),
-            modal_launches=modal_launches,
             endpoint_records=load_llm_router_endpoint_records(resolved_layout),
             error=error,
             error_count=_router_error_count(resolved_layout),
@@ -1564,6 +1916,16 @@ def create_router_app(*, layout: ArtifactLayout | None = None) -> FastAPI:
         usage = response_body.get("usage") if isinstance(response_body, dict) else None
         if not isinstance(usage, dict):
             usage = {}
+        upstream_request_seconds = router_metadata.get("request_duration_seconds")
+        if not isinstance(upstream_request_seconds, (int, float)):
+            upstream_request_seconds = None
+        end_to_end_request_seconds = max((completed_at - started_at).total_seconds(), 0.0)
+        queue_wait_seconds = None
+        if upstream_request_seconds is not None:
+            queue_wait_seconds = max(
+                end_to_end_request_seconds - float(upstream_request_seconds),
+                0.0,
+            )
         entry = {
             "id": uuid4().hex,
             "status": status,
@@ -1598,10 +1960,18 @@ def create_router_app(*, layout: ArtifactLayout | None = None) -> FastAPI:
             },
             "timing": {
                 "router_request_seconds": round(
-                    max((completed_at - started_at).total_seconds(), 0.0),
+                    float(upstream_request_seconds)
+                    if upstream_request_seconds is not None
+                    else end_to_end_request_seconds,
                     6,
                 ),
-                "upstream_request_seconds": router_metadata.get("request_duration_seconds"),
+                "upstream_request_seconds": round(float(upstream_request_seconds), 6)
+                if upstream_request_seconds is not None
+                else None,
+                "end_to_end_request_seconds": round(end_to_end_request_seconds, 6),
+                "queue_wait_seconds": round(queue_wait_seconds, 6)
+                if queue_wait_seconds is not None
+                else None,
             },
             "response_headers": (
                 {
@@ -2055,6 +2425,20 @@ def create_router_app(*, layout: ArtifactLayout | None = None) -> FastAPI:
                 await _sync_router_sources(refresh_health=False)
         app.state.router_panel_cache = None
         return RedirectResponse(next_url, status_code=303)
+
+    @app.post("/router/vast/start")
+    async def start_vast_instance(request: Request) -> RedirectResponse:
+        body_text = (await request.body()).decode("utf-8")
+        parsed_form = parse_qs(body_text, keep_blank_values=True)
+        next_url = parsed_form.get("next", ["/"])[0] or "/"
+        return _redirect_with_error(next_url, "Vast support has been removed from llm_router.")
+
+    @app.post("/router/vast/stop")
+    async def stop_vast_instance(request: Request) -> RedirectResponse:
+        body_text = (await request.body()).decode("utf-8")
+        parsed_form = parse_qs(body_text, keep_blank_values=True)
+        next_url = parsed_form.get("next", ["/"])[0] or "/"
+        return _redirect_with_error(next_url, "Vast support has been removed from llm_router.")
 
     @app.post("/router/connections/{connection_id}")
     async def update_router_connection(request: Request, connection_id: str) -> Response:
@@ -2714,6 +3098,7 @@ def create_router_app(*, layout: ArtifactLayout | None = None) -> FastAPI:
             )
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         except httpx.HTTPStatusError as exc:
+            error_detail = DashboardLLMRouter._format_upstream_error(exc)
             _log_router_request_error(layout=resolved_layout, payload=payload, error=exc)
             await asyncio.to_thread(
                 _record_router_request,
@@ -2723,9 +3108,9 @@ def create_router_app(*, layout: ArtifactLayout | None = None) -> FastAPI:
                 completed_at=datetime.now(timezone.utc),
                 status="failed",
                 http_status_code=502,
-                error_message=str(exc),
+                error_message=error_detail,
             )
-            raise HTTPException(status_code=502, detail=str(exc)) from exc
+            raise HTTPException(status_code=502, detail=error_detail) from exc
         except httpx.HTTPError as exc:
             _log_router_request_error(layout=resolved_layout, payload=payload, error=exc)
             await asyncio.to_thread(
