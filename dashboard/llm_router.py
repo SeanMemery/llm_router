@@ -680,9 +680,12 @@ class DashboardLLMRouter:
             body = response.json()
             if not self._models_probe_body_has_models_list(body):
                 raise RuntimeError("Upstream health probe did not return a models list")
-            runtime.max_context_tokens = self._infer_runtime_context_tokens(runtime, body)
-            if runtime.max_context_tokens is None:
-                runtime.max_context_tokens = await self._probe_runtime_context_tokens_from_props(runtime)
+            models_context = self._infer_runtime_context_tokens(runtime, body)
+            props_context = await self._probe_runtime_context_tokens_from_props(runtime)
+            if models_context is not None and props_context is not None:
+                runtime.max_context_tokens = min(models_context, props_context)
+            else:
+                runtime.max_context_tokens = models_context if models_context is not None else props_context
             runtime.health_probe_failures = 0
             runtime.last_healthy_at = self._time_fn()
             await self.set_connection_active(runtime.config.connection_id, active=True, last_error=None)
