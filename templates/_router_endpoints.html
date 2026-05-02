@@ -16,22 +16,23 @@
 <p class="empty">No backend connections configured yet.</p>
 {% endif %}
 {% for endpoint in endpoint_list %}
-<article class="router-endpoint">
-  <div class="router-endpoint-summary" data-router-modal-open="router-endpoint-modal-{{ endpoint.endpoint_id }}" tabindex="0" role="button" aria-haspopup="dialog" aria-controls="router-endpoint-modal-{{ endpoint.endpoint_id }}">
+<article class="router-endpoint router-worker-card">
+  <div class="router-endpoint-summary router-worker-summary" data-router-modal-open="router-endpoint-modal-{{ endpoint.endpoint_id }}" tabindex="0" role="button" aria-haspopup="dialog" aria-controls="router-endpoint-modal-{{ endpoint.endpoint_id }}">
     <div class="router-endpoint-main">
       <div class="router-endpoint-title">
-        <code>{{ endpoint.base_url }}</code>
+        <strong class="router-worker-model">{{ endpoint.base_url }}</strong>
         <span class="pill">{{ endpoint.source_label }}</span>
         {% if endpoint.starred %}
         <span class="router-star-badge" title="Starred URL">★</span>
         {% endif %}
       </div>
-      <div class="router-token-strip" title="Total output tokens for this URL">
-        <span class="router-token-bar" aria-hidden="true"></span>
-        <span class="router-token-label">{{ endpoint.completion_tokens_label }} tks</span>
+      <div class="router-worker-summary-meta">
+        <span>{{ endpoint.completion_tokens_label }} tks</span>
+        <span>{{ endpoint.request_count }} reqs</span>
+        <span>{{ endpoint.model_count }} models</span>
       </div>
     </div>
-    <div class="router-endpoint-summary-right">
+    <div class="router-endpoint-summary-right router-worker-summary-right">
       <form method="post" action="/router/urls/priority" class="router-worker-inline-form" onclick="event.stopPropagation();">
         <input type="hidden" name="next" value="/">
         <input type="hidden" name="connection_base_url" value="{{ endpoint.base_url }}">
@@ -55,6 +56,10 @@
           {% endfor %}
         </div>
         <span class="router-activity-stat">{{ endpoint.in_flight_requests }}/{{ endpoint.max_concurrent_requests }}</span>
+      </div>
+      <div class="router-worker-summary-pills">
+        <span class="pill">P{{ endpoint.priority }}</span>
+        <span class="pill">{{ endpoint.active_models }}/{{ endpoint.model_count }}</span>
       </div>
     </div>
   </div>
