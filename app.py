@@ -3431,6 +3431,50 @@ def create_router_app(*, layout: ArtifactLayout | None = None) -> FastAPI:
             return RedirectResponse(next_url, status_code=303)
         return JSONResponse({"worker": worker.model_dump(mode="json")})
 
+    @app.post("/router/workers/{worker_id}/disable")
+    async def disable_router_worker(request: Request, worker_id: str) -> Response:
+        content_type = request.headers.get("content-type", "")
+        next_url = "/"
+        if "application/json" not in content_type:
+            body_text = (await request.body()).decode("utf-8")
+            parsed_form = parse_qs(body_text, keep_blank_values=True)
+            next_url = parsed_form.get("next", ["/"])[0] or "/"
+        try:
+            worker_registry.get_worker(worker_id)
+            await dashboard_llm_router.set_connection_manually_disabled(
+                f"worker:{worker_id}",
+                disabled=True,
+            )
+            await dashboard_llm_router.refresh_connection_health()
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=f"Router worker not found: {worker_id}") from exc
+        await _persist_router_snapshot(layout=resolved_layout, router=dashboard_llm_router)
+        if "application/json" not in content_type:
+            return RedirectResponse(next_url, status_code=303)
+        return JSONResponse(dashboard_llm_router.snapshot().model_dump(mode="json"))
+
+    @app.post("/router/workers/{worker_id}/enable")
+    async def enable_router_worker(request: Request, worker_id: str) -> Response:
+        content_type = request.headers.get("content-type", "")
+        next_url = "/"
+        if "application/json" not in content_type:
+            body_text = (await request.body()).decode("utf-8")
+            parsed_form = parse_qs(body_text, keep_blank_values=True)
+            next_url = parsed_form.get("next", ["/"])[0] or "/"
+        try:
+            worker_registry.get_worker(worker_id)
+            await dashboard_llm_router.set_connection_manually_disabled(
+                f"worker:{worker_id}",
+                disabled=False,
+            )
+            await dashboard_llm_router.refresh_connection_health()
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=f"Router worker not found: {worker_id}") from exc
+        await _persist_router_snapshot(layout=resolved_layout, router=dashboard_llm_router)
+        if "application/json" not in content_type:
+            return RedirectResponse(next_url, status_code=303)
+        return JSONResponse(dashboard_llm_router.snapshot().model_dump(mode="json"))
+
     @app.get("/api/v1/workers")
     async def list_workers() -> JSONResponse:
         return JSONResponse(

@@ -13,8 +13,10 @@
 {%- endmacro %}
 
 {% macro render_worker_card(worker, worker_connection, type_label) -%}
-<details class="router-endpoint router-worker-card" data-persist-key="router-worker-{{ worker.worker_id }}">
-  <summary class="router-endpoint-summary router-worker-summary">
+{% set worker_is_disabled = worker_connection.manually_disabled %}
+{% set worker_is_active = worker_connection.active and not worker_is_disabled %}
+<article class="router-endpoint router-worker-card">
+  <div class="router-endpoint-summary router-worker-summary" data-router-modal-open="router-worker-modal-{{ worker.worker_id }}" tabindex="0" role="button" aria-haspopup="dialog" aria-controls="router-worker-modal-{{ worker.worker_id }}">
     <div class="router-endpoint-main">
       <div class="router-endpoint-title">
         <strong class="router-worker-model">{{ worker.display_name }}</strong>
@@ -32,6 +34,12 @@
       </div>
     </div>
     <div class="router-endpoint-summary-right router-worker-summary-right">
+      <form method="post" action="/router/workers/{{ worker.worker_id }}/{{ 'disable' if worker_is_active else 'enable' }}" onsubmit="event.stopPropagation();">
+        <input type="hidden" name="next" value="/">
+        <button class="pill status-{{ 'running' if worker_is_active else 'failed' }}" type="submit" onclick="event.stopPropagation();">
+          {{ 'Active' if worker_is_active else 'Disabled' }}
+        </button>
+      </form>
       <div class="router-summary-activity" aria-label="Worker activity">
         <div class="router-slot-strip" title="{{ worker_connection.in_flight_requests }}/{{ worker_connection.max_concurrent_requests }} in flight">
           {% set slot_count = worker_connection.max_concurrent_requests if worker_connection.max_concurrent_requests > 0 else 1 %}
@@ -44,102 +52,121 @@
       <div class="router-worker-summary-pills">
         <span class="pill">P{{ worker.router_priority }}</span>
         <span class="pill">{{ worker_connection.max_concurrent_requests }}/{{ worker.max_concurrent_requests }}</span>
-        <span class="pill status-running">Active</span>
       </div>
     </div>
-  </summary>
-  <div class="router-endpoint-body">
-    <div class="router-worker-config-row">
-      <form
-        method="post"
-        action="/router/workers/{{ worker.worker_id }}/priority"
-        class="router-worker-inline-form"
-      >
-        <input type="hidden" name="next" value="/">
-        <label class="router-worker-inline-label">
-          <span>Priority</span>
-          <input
-            class="input-parallel auto-submit router-worker-inline-input"
-            type="number"
-            min="1"
-            max="99"
-            name="router_priority"
-            value="{{ worker.router_priority }}"
-          >
-        </label>
-      </form>
-      <form
-        method="post"
-        action="/router/workers/{{ worker.worker_id }}/parallelism"
-        class="router-worker-inline-form"
-      >
-        <input type="hidden" name="next" value="/">
-        <label class="router-worker-inline-label">
-          <span>Parallel</span>
-          <input
-            class="input-parallel auto-submit router-worker-inline-input"
-            type="number"
-            min="1"
-            max="{{ worker.max_concurrent_requests }}"
-            name="router_max_concurrent_requests"
-            value="{{ worker.router_max_concurrent_requests or '' }}"
-            placeholder="{{ worker.max_concurrent_requests }}"
-          >
-        </label>
-      </form>
-    </div>
-    <table class="router-table router-model-table">
-      <thead>
-        <tr>
-          <th>Canonical</th>
-          <th>Ctx avg</th>
-          <th>Ctx toks</th>
-          <th>Output toks</th>
-          <th>Avg time</th>
-          <th>Avg tok/s</th>
-          <th>Usage</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% set reqs = worker_connection.telemetry.request_count or 0 %}
-        {% set avg_ctx = (worker_connection.telemetry.total_prompt_tokens or 0) / reqs if reqs > 0 else None %}
-        <tr>
-          <td>
-            {% if worker_connection.canonical_model %}
-            <span class="pill pill-canonical">{{ worker_connection.canonical_model }}</span>
-            {% else %}
-            <span class="pill">—</span>
-            {% endif %}
-          </td>
-          <td>
-            {% if avg_ctx is not none %}
-              {{ "%.1fK"|format(avg_ctx / 1000) }}
-            {% else %}
-              --
-            {% endif %}
-          </td>
-          <td>{{ compact_tokens(worker_connection.telemetry.total_prompt_tokens or 0) }}</td>
-          <td>{{ compact_tokens(worker_connection.telemetry.total_completion_tokens or 0) }}</td>
-          <td>
-            {% if worker_connection.telemetry.average_recent_request_seconds is not none %}
-              {{ "%.2f"|format(worker_connection.telemetry.average_recent_request_seconds) }} s
-            {% else %}
-              --
-            {% endif %}
-          </td>
-          <td>{{ "%.2f"|format(worker_connection.telemetry.average_output_tokens_per_second or 0.0) }}</td>
-          <td>
-            {% if worker_connection.usage_percentage is not none %}
-              {{ "%.1f"|format(worker_connection.usage_percentage) }}%
-            {% else %}
-              --
-            {% endif %}
-          </td>
-        </tr>
-      </tbody>
-    </table>
   </div>
-</details>
+</article>
+
+<div class="router-page-modal router-endpoint-modal" id="router-worker-modal-{{ worker.worker_id }}" hidden>
+  <div class="router-page-modal-backdrop" data-router-modal-close></div>
+  <section class="card router-page-modal-card router-endpoint-modal-card" role="dialog" aria-modal="true" aria-labelledby="router-worker-modal-title-{{ worker.worker_id }}">
+    <div class="card-topline">
+      <div>
+        <p class="section-kicker">Worker</p>
+        <h2 id="router-worker-modal-title-{{ worker.worker_id }}">{{ worker.display_name }}</h2>
+        <p class="metric-subtle"><code>{{ worker.model }}</code></p>
+      </div>
+      <button class="secondary-button" type="button" data-router-modal-close data-router-modal-initial-focus>Close</button>
+    </div>
+    <div class="router-endpoint-body">
+      <div class="router-worker-config-row">
+        <form
+          method="post"
+          action="/router/workers/{{ worker.worker_id }}/priority"
+          class="router-worker-inline-form"
+        >
+          <input type="hidden" name="next" value="/">
+          <label class="router-worker-inline-label">
+            <span>Priority</span>
+            <input
+              class="input-parallel auto-submit router-worker-inline-input"
+              type="number"
+              min="1"
+              max="99"
+              name="router_priority"
+              value="{{ worker.router_priority }}"
+            >
+          </label>
+        </form>
+        <form
+          method="post"
+          action="/router/workers/{{ worker.worker_id }}/parallelism"
+          class="router-worker-inline-form"
+        >
+          <input type="hidden" name="next" value="/">
+          <label class="router-worker-inline-label">
+            <span>Parallel</span>
+            <input
+              class="input-parallel auto-submit router-worker-inline-input"
+              type="number"
+              min="1"
+              max="{{ worker.max_concurrent_requests }}"
+              name="router_max_concurrent_requests"
+              value="{{ worker.router_max_concurrent_requests or '' }}"
+              placeholder="{{ worker.max_concurrent_requests }}"
+            >
+          </label>
+        </form>
+        <form method="post" action="/router/workers/{{ worker.worker_id }}/{{ 'disable' if worker_is_active else 'enable' }}">
+          <input type="hidden" name="next" value="/">
+          <button class="pill status-{{ 'running' if worker_is_active else 'failed' }}" type="submit">
+            {{ 'Active' if worker_is_active else 'Disabled' }}
+          </button>
+        </form>
+      </div>
+      <table class="router-table router-model-table">
+        <thead>
+          <tr>
+            <th>Canonical</th>
+            <th>Ctx avg</th>
+            <th>Ctx toks</th>
+            <th>Output toks</th>
+            <th>Avg time</th>
+            <th>Avg tok/s</th>
+            <th>Usage</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% set reqs = worker_connection.telemetry.request_count or 0 %}
+          {% set avg_ctx = (worker_connection.telemetry.total_prompt_tokens or 0) / reqs if reqs > 0 else None %}
+          <tr>
+            <td>
+              {% if worker_connection.canonical_model %}
+              <span class="pill pill-canonical">{{ worker_connection.canonical_model }}</span>
+              {% else %}
+              <span class="pill">—</span>
+              {% endif %}
+            </td>
+            <td>
+              {% if avg_ctx is not none %}
+                {{ "%.1fK"|format(avg_ctx / 1000) }}
+              {% else %}
+                --
+              {% endif %}
+            </td>
+            <td>{{ compact_tokens(worker_connection.telemetry.total_prompt_tokens or 0) }}</td>
+            <td>{{ compact_tokens(worker_connection.telemetry.total_completion_tokens or 0) }}</td>
+            <td>
+              {% if worker_connection.telemetry.average_recent_request_seconds is not none %}
+                {{ "%.2f"|format(worker_connection.telemetry.average_recent_request_seconds) }} s
+              {% else %}
+                --
+              {% endif %}
+            </td>
+            <td>{{ "%.2f"|format(worker_connection.telemetry.average_output_tokens_per_second or 0.0) }}</td>
+            <td>
+              {% if worker_connection.usage_percentage is not none %}
+                {{ "%.1f"|format(worker_connection.usage_percentage) }}%
+              {% else %}
+                --
+              {% endif %}
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+</div>
 {%- endmacro %}
 
 {% set automatic_workers = router_panel.workers | selectattr('transport_mode', 'equalto', 'pull-request') | rejectattr('metadata.launcher', 'equalto', 'modal_worker') | list %}
