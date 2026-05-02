@@ -18,7 +18,9 @@
     <div class="router-endpoint-main">
       <div class="router-endpoint-title">
         <strong class="router-worker-model">{{ worker.display_name }}</strong>
+        {% if type_label %}
         <span class="pill">{{ type_label }}</span>
+        {% endif %}
         <span class="pill">{{ worker.model }}</span>
       </div>
       <div class="router-worker-summary-meta">
@@ -140,215 +142,16 @@
 </details>
 {%- endmacro %}
 
-{% macro render_modal_launch_card(launch, worker, worker_connection) -%}
-{% set launch_key = launch.worker_id or launch.launch_id %}
-{% set app_id = launch.metadata.get('modal_app_id') if launch.metadata else None %}
-{% set log_label = launch.log_path.split('/')[-1] if launch.log_path else None %}
-<details class="router-endpoint router-worker-card" data-persist-key="router-modal-{{ launch_key }}">
-  <summary class="router-endpoint-summary router-worker-summary">
-    <div class="router-endpoint-main">
-      <div class="router-endpoint-title">
-        <strong class="router-worker-model">{{ launch.display_name }}</strong>
-        <span class="pill">Modal</span>
-        <span class="pill">{{ launch.model }}</span>
-      </div>
-      <div class="router-worker-summary-meta">
-        {% if worker_connection %}
-        <span>{{ compact_tokens(worker_connection.telemetry.total_completion_tokens or 0) }} tks</span>
-        <span>{{ worker_connection.telemetry.request_count or 0 }} reqs</span>
-        {% if worker_connection.telemetry.average_output_tokens_per_second is not none %}
-        <span>{{ "%.0f"|format(worker_connection.telemetry.average_output_tokens_per_second or 0.0) }} t/s</span>
-        {% endif %}
-        {% else %}
-        <span>{{ launch.duration_minutes }} min</span>
-        {% if app_id %}
-        <span>{{ app_id }}</span>
-        {% endif %}
-        {% endif %}
-      </div>
-    </div>
-    <div class="router-endpoint-summary-right router-worker-summary-right">
-      {% if worker_connection and worker %}
-      <div class="router-summary-activity" aria-label="Worker activity">
-        <div class="router-slot-strip" title="{{ worker_connection.in_flight_requests }}/{{ worker_connection.max_concurrent_requests }} in flight">
-          {% set slot_count = worker_connection.max_concurrent_requests if worker_connection.max_concurrent_requests > 0 else 1 %}
-          {% for _ in range(slot_count) %}
-          <span class="router-slot {% if loop.index0 < worker_connection.in_flight_requests %}is-active{% endif %}"></span>
-          {% endfor %}
-        </div>
-        <span class="router-activity-stat">{{ worker_connection.in_flight_requests }}/{{ worker_connection.max_concurrent_requests }}</span>
-      </div>
-      {% endif %}
-      <div class="router-worker-summary-pills">
-        {% if worker %}
-        <span class="pill">P{{ worker.router_priority }}</span>
-        {% if worker_connection %}
-        <span class="pill">{{ worker_connection.max_concurrent_requests }}/{{ worker.max_concurrent_requests }}</span>
-        {% else %}
-        <span class="pill">--/{{ worker.max_concurrent_requests }}</span>
-        {% endif %}
-        {% endif %}
-        <span class="pill {% if launch.status == 'running' %}status-running{% elif launch.status in ['failed', 'expired', 'exited'] %}pill-error{% endif %}">{{ launch.status }}</span>
-      </div>
-    </div>
-  </summary>
-  <div class="router-endpoint-body">
-    {% if worker and worker_connection %}
-    <div class="router-worker-config-row">
-      <form
-        method="post"
-        action="/router/workers/{{ worker.worker_id }}/priority"
-        class="router-worker-inline-form"
-      >
-        <input type="hidden" name="next" value="/">
-        <label class="router-worker-inline-label">
-          <span>Priority</span>
-          <input
-            class="input-parallel auto-submit router-worker-inline-input"
-            type="number"
-            min="1"
-            max="99"
-            name="router_priority"
-            value="{{ worker.router_priority }}"
-          >
-        </label>
-      </form>
-      <form
-        method="post"
-        action="/router/workers/{{ worker.worker_id }}/parallelism"
-        class="router-worker-inline-form"
-      >
-        <input type="hidden" name="next" value="/">
-        <label class="router-worker-inline-label">
-          <span>Parallel</span>
-          <input
-            class="input-parallel auto-submit router-worker-inline-input"
-            type="number"
-            min="1"
-            max="{{ worker.max_concurrent_requests }}"
-            name="router_max_concurrent_requests"
-            value="{{ worker.router_max_concurrent_requests or '' }}"
-            placeholder="{{ worker.max_concurrent_requests }}"
-          >
-        </label>
-      </form>
-      {% if launch.status in ['starting', 'running'] %}
-      <form method="post" action="/router/modal-workers/{{ launch.launch_id }}/stop">
-        <input type="hidden" name="next" value="/">
-        <button class="secondary-button danger-button" type="submit">Stop</button>
-      </form>
-      {% endif %}
-    </div>
-    <table class="router-table router-model-table">
-      <thead>
-        <tr>
-          <th>Canonical</th>
-          <th>Ctx avg</th>
-          <th>Ctx toks</th>
-          <th>Output toks</th>
-          <th>Avg time</th>
-          <th>Avg tok/s</th>
-          <th>Usage</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% set reqs = worker_connection.telemetry.request_count or 0 %}
-        {% set avg_ctx = (worker_connection.telemetry.total_prompt_tokens or 0) / reqs if reqs > 0 else None %}
-        <tr>
-          <td>
-            {% if worker_connection.canonical_model %}
-            <span class="pill pill-canonical">{{ worker_connection.canonical_model }}</span>
-            {% else %}
-            <span class="pill">—</span>
-            {% endif %}
-          </td>
-          <td>
-            {% if avg_ctx is not none %}
-              {{ "%.1fK"|format(avg_ctx / 1000) }}
-            {% else %}
-              --
-            {% endif %}
-          </td>
-          <td>{{ compact_tokens(worker_connection.telemetry.total_prompt_tokens or 0) }}</td>
-          <td>{{ compact_tokens(worker_connection.telemetry.total_completion_tokens or 0) }}</td>
-          <td>
-            {% if worker_connection.telemetry.average_recent_request_seconds is not none %}
-              {{ "%.2f"|format(worker_connection.telemetry.average_recent_request_seconds) }} s
-            {% else %}
-              --
-            {% endif %}
-          </td>
-          <td>{{ "%.2f"|format(worker_connection.telemetry.average_output_tokens_per_second or 0.0) }}</td>
-          <td>
-            {% if worker_connection.usage_percentage is not none %}
-              {{ "%.1f"|format(worker_connection.usage_percentage) }}%
-            {% else %}
-              --
-            {% endif %}
-          </td>
-        </tr>
-      </tbody>
-    </table>
-    {% elif worker %}
-    <div class="router-worker-config-row">
-      <form
-        method="post"
-        action="/router/workers/{{ worker.worker_id }}/priority"
-        class="router-worker-inline-form"
-      >
-        <input type="hidden" name="next" value="/">
-        <label class="router-worker-inline-label">
-          <span>Priority</span>
-          <input
-            class="input-parallel auto-submit router-worker-inline-input"
-            type="number"
-            min="1"
-            max="99"
-            name="router_priority"
-            value="{{ worker.router_priority }}"
-          >
-        </label>
-      </form>
-      {% if launch.status in ['starting', 'running'] %}
-      <form method="post" action="/router/modal-workers/{{ launch.launch_id }}/stop">
-        <input type="hidden" name="next" value="/">
-        <button class="secondary-button danger-button" type="submit">Stop</button>
-      </form>
-      {% endif %}
-    </div>
-    {% else %}
-    <div class="router-worker-config-row">
-      {% if launch.status in ['starting', 'running'] %}
-      <form method="post" action="/router/modal-workers/{{ launch.launch_id }}/stop">
-        <input type="hidden" name="next" value="/">
-        <button class="secondary-button danger-button" type="submit">Stop</button>
-      </form>
-      {% endif %}
-    </div>
-    {% endif %}
-    <div class="router-modal-detail-grid">
-      <div><span class="router-modal-detail-label">Launch</span><code>{{ launch.launch_id }}</code></div>
-      {% if launch.worker_id %}
-      <div><span class="router-modal-detail-label">Worker</span><code>{{ launch.worker_id }}</code></div>
-      {% endif %}
-      {% if app_id %}
-      <div><span class="router-modal-detail-label">App</span><code>{{ app_id }}</code></div>
-      {% endif %}
-      <div><span class="router-modal-detail-label">Window</span><span>{{ launch.duration_minutes }} min</span></div>
-      {% if log_label %}
-      <div><span class="router-modal-detail-label">Log</span><span>{{ log_label }}</span></div>
-      {% endif %}
-      {% if launch.last_error %}
-      <div class="router-modal-detail-error"><span class="router-modal-detail-label">Error</span><span>{{ launch.last_error }}</span></div>
-      {% endif %}
-    </div>
-  </div>
-</details>
-{%- endmacro %}
-
 {% set automatic_workers = router_panel.workers | selectattr('transport_mode', 'equalto', 'pull-request') | rejectattr('metadata.launcher', 'equalto', 'modal_worker') | list %}
 {% set other_workers = router_panel.workers | rejectattr('transport_mode', 'equalto', 'pull-request') | list %}
-{% set live_modal_launches = router_panel.modal_launches | selectattr('status', 'in', ['starting', 'running']) | list %}
+{% set managed_vast_base_urls = router_panel.vast_instance.known_base_urls if router_panel.vast_instance and router_panel.vast_instance.known_base_urls else [] %}
+{% set managed_modal_base_urls = router_panel.modal_connections | map(attribute='base_url') | reject('equalto', none) | list if router_panel.modal_connections else [] %}
+{% set url_endpoints = [] %}
+{% for endpoint in router_panel.endpoints %}
+  {% if endpoint.base_url not in managed_vast_base_urls and endpoint.base_url not in managed_modal_base_urls %}
+    {% set _ = url_endpoints.append(endpoint) %}
+  {% endif %}
+{% endfor %}
 
 <section class="router-column router-workers-shell">
   <div class="router-workers-grid">
@@ -365,9 +168,8 @@
       <div class="router-worker-list">
         {% for worker in automatic_workers %}
         {% set worker_connection = (router_panel.worker_connections | selectattr('worker_id', 'equalto', worker.worker_id) | list | first) %}
-        {% set worker_type = 'Modal' if worker.metadata and worker.metadata.get('launcher') == 'modal_worker' else 'Auto' %}
         {% if worker_connection %}
-        {{ render_worker_card(worker, worker_connection, worker_type) }}
+        {{ render_worker_card(worker, worker_connection, '') }}
         {% endif %}
         {% endfor %}
       </div>
@@ -382,7 +184,7 @@
           <p class="section-kicker">URL LLMs</p>
         </div>
         <div class="router-summary-pills">
-          <span class="pill">{{ router_panel.endpoints | length }} URLs</span>
+          <span class="pill">{{ url_endpoints | length }} URLs</span>
           {% if other_workers %}
           <span class="pill">{{ other_workers | length }} other</span>
           {% endif %}
@@ -398,50 +200,12 @@
         {% endfor %}
       </div>
       {% endif %}
+      {% set endpoints = url_endpoints %}
       {% include "_router_endpoints.html" %}
     </section>
   </div>
 
-  <section class="router-workers-card router-modal-card">
-    <div class="router-workers-head">
-      <div>
-        <p class="section-kicker">Modal</p>
-      </div>
-      <div class="router-summary-pills">
-        <span class="pill">{{ live_modal_launches | length }} live</span>
-      </div>
-    </div>
-    <form method="post" action="/router/modal-workers/start" class="router-add-form">
-      <input type="hidden" name="next" value="/">
-      <div class="router-modal-grid">
-        <label>
-          <span>Model</span>
-          <input type="text" name="modal_model" list="modal-model-options" value="{{ router_panel.modal_model_options[0] if router_panel.modal_model_options else '' }}">
-        </label>
-        <label>
-          <span>Minutes</span>
-          <input class="input-parallel" type="number" min="1" max="10080" name="modal_duration_minutes" value="60">
-        </label>
-        <div class="router-actions router-add-submit">
-          <button class="secondary-button" type="submit">Start Modal</button>
-        </div>
-      </div>
-      <datalist id="modal-model-options">
-        {% for model in router_panel.modal_model_options %}
-        <option value="{{ model }}"></option>
-        {% endfor %}
-      </datalist>
-    </form>
-    {% if live_modal_launches %}
-    <div class="router-modal-launch-list">
-      {% for launch in live_modal_launches %}
-      {% set modal_worker = (router_panel.workers | selectattr('worker_id', 'equalto', launch.worker_id) | list | first) %}
-      {% set modal_worker_connection = (router_panel.worker_connections | selectattr('worker_id', 'equalto', launch.worker_id) | list | first) %}
-      {{ render_modal_launch_card(launch, modal_worker, modal_worker_connection) }}
-      {% endfor %}
-    </div>
-    {% else %}
-    <p class="metric-subtle">No live Modal relays.</p>
-    {% endif %}
-  </section>
+  <div id="router-managed-modal" data-endpoint-support="modal">
+    {% include "_router_modal.html" %}
+  </div>
 </section>
