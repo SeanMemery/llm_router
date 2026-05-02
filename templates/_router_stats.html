@@ -1,0 +1,33 @@
+<section class="router-stats-card">
+  <div class="router-stats-head">
+    <p class="section-kicker">Stats</p>
+  </div>
+  <table class="router-stats-table">
+    <tbody>
+      <tr>
+        <th scope="row">Input</th>
+        <td>{{ router_panel.total_prompt_tokens_label }}</td>
+      </tr>
+      <tr>
+        <th scope="row">Output</th>
+        <td>{{ router_panel.total_completion_tokens_label }}</td>
+      </tr>
+      <tr>
+        <th scope="row">Throughput <span class="router-stats-window">(10m)</span></th>
+        <td>{{ router_panel.total_output_tokens_per_second }} t/s</td>
+      </tr>
+      <tr>
+        <th scope="row">Avg time <span class="router-stats-window">(10m)</span></th>
+        <td>{{ router_panel.average_request_seconds }} s</td>
+      </tr>
+      <tr>
+        <th scope="row">Live</th>
+        <td>{{ router_panel.connections | sum(attribute='in_flight_requests') }}</td>
+      </tr>
+      <tr>
+        <th scope="row">Waiting</th>
+        <td>{{ router_panel.waiting_requests }}</td>
+      </tr>
+    </tbody>
+  </table>
+</section>

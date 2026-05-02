@@ -1,0 +1,151 @@
+{% set modal_connections = router_panel.modal_connections or [] %}
+{% set modal_endpoints = router_panel.endpoints | selectattr('base_url', 'in', (modal_connections | map(attribute='base_url') | list)) | list if modal_connections else [] %}
+
+<section class="router-workers-card router-vast-card router-vast-footer">
+  <div class="router-workers-head router-vast-head">
+    <div>
+      <p class="section-kicker">Managed Modal</p>
+      <p class="metric-subtle">Launch + attach Modal vLLM endpoints.</p>
+    </div>
+    <div class="router-summary-pills">
+      <span class="pill">{{ modal_connections | length }} active</span>
+    </div>
+  </div>
+
+  <form method="post" action="/router/modal/start" class="router-add-form">
+    <input type="hidden" name="next" value="/">
+    <div class="router-modal-grid">
+      <label>
+        <span>Model</span>
+        <input list="modal-model-options" type="text" name="modal_connection_model" value="{{ (router_panel.modal_model_options | first) if router_panel.modal_model_options else '' }}">
+      </label>
+      <label>
+        <span>GPU</span>
+        <input list="modal-gpu-options" type="text" name="modal_connection_gpu" value="{{ (router_panel.modal_gpu_options | first) if router_panel.modal_gpu_options else 'L40S' }}">
+      </label>
+      <label>
+        <span>Served name</span>
+        <input type="text" name="modal_connection_served_model_name" value="llm">
+      </label>
+      <label>
+        <span>Max ctx</span>
+        <input class="input-parallel" type="number" min="1024" max="262144" name="modal_connection_max_model_len" value="8192">
+      </label>
+      <label>
+        <span>Duration min</span>
+        <input class="input-parallel" type="number" min="5" max="10080" name="modal_connection_duration_minutes" value="240">
+      </label>
+      <label>
+        <span>API key (optional)</span>
+        <input type="password" name="modal_connection_api_key" value="" autocomplete="off">
+      </label>
+      <div class="router-actions">
+        <button class="secondary-button" type="submit">Start Modal endpoint</button>
+      </div>
+    </div>
+    <datalist id="modal-model-options">
+      {% for option in router_panel.modal_model_options or [] %}
+      <option value="{{ option }}"></option>
+      {% endfor %}
+    </datalist>
+    <datalist id="modal-gpu-options">
+      {% for option in router_panel.modal_gpu_options or [] %}
+      <option value="{{ option }}"></option>
+      {% endfor %}
+    </datalist>
+  </form>
+
+  {% if modal_connections %}
+  <div class="router-modal-launch-list">
+    {% for connection in modal_connections %}
+    <details class="router-endpoint router-worker-card" data-persist-key="router-modal-{{ connection.launch_id }}" open>
+      <summary class="router-endpoint-summary">
+        <div class="router-endpoint-main">
+          <div class="router-endpoint-title">
+            <strong class="router-worker-model">{{ connection.display_name }}</strong>
+            <span class="pill">{{ connection.gpu }}</span>
+            <span class="pill">{{ connection.served_model_name }}</span>
+          </div>
+          <div class="router-worker-summary-meta">
+            <span>{{ connection.model }}</span>
+          </div>
+        </div>
+        <div class="router-endpoint-summary-right">
+          <div class="router-worker-summary-pills">
+            <span class="pill status-{{ connection.status_class }}">{{ connection.status_label }}</span>
+            {% if connection.app_id %}
+            <span class="pill">{{ connection.app_id }}</span>
+            {% endif %}
+          </div>
+        </div>
+      </summary>
+      <div class="router-endpoint-body">
+        <div class="router-actions">
+          <form method="post" action="/router/modal/{{ connection.launch_id }}/stop">
+            <input type="hidden" name="next" value="/">
+            <button class="secondary-button" type="submit">Stop</button>
+          </form>
+        </div>
+        <div class="router-modal-detail-grid">
+          <div>
+            <span class="router-modal-detail-label">Base URL</span>
+            <span>{{ connection.base_url or "Pending..." }}</span>
+          </div>
+          <div>
+            <span class="router-modal-detail-label">Model</span>
+            <span>{{ connection.model }}</span>
+          </div>
+          <div>
+            <span class="router-modal-detail-label">Duration</span>
+            <span>{{ connection.duration_minutes }} minutes</span>
+          </div>
+          {% if connection.metadata and connection.metadata.get("requested_gpu") and connection.metadata.get("requested_gpu") != connection.gpu %}
+          <div>
+            <span class="router-modal-detail-label">Requested GPU</span>
+            <span>{{ connection.metadata.get("requested_gpu") }} (mapped to {{ connection.gpu }})</span>
+          </div>
+          {% endif %}
+          <div>
+            <span class="router-modal-detail-label">API key</span>
+            <span>{% if connection.api_key_set %}Configured{% else %}Not set{% endif %}</span>
+          </div>
+          <div>
+            <span class="router-modal-detail-label">Log</span>
+            <code>{{ connection.log_path }}</code>
+          </div>
+          {% if connection.last_error %}
+          <div>
+            <span class="router-modal-detail-label router-modal-detail-error">Error</span>
+            <span class="router-modal-detail-error">{{ connection.last_error }}</span>
+          </div>
+          {% endif %}
+        </div>
+      </div>
+    </details>
+    {% endfor %}
+  </div>
+  {% else %}
+  <p class="metric-subtle">No managed Modal endpoints are running.</p>
+  {% endif %}
+
+  {% if modal_endpoints %}
+  <div class="router-vast-endpoints">
+    <div class="router-workers-head router-vast-list-head">
+      <div><p class="section-kicker">Attached Connections</p></div>
+      <div class="router-summary-pills"><span class="pill">{{ modal_endpoints | length }}</span></div>
+    </div>
+    <div class="router-vast-endpoint-list">
+      {% for endpoint in modal_endpoints %}
+      <div class="router-vast-endpoint-row">
+        <code>{{ endpoint.base_url }}</code>
+        <div class="router-summary-pills">
+          <span class="pill status-{{ endpoint.status_class }}">{{ endpoint.status_label }}</span>
+          <span class="pill">{{ endpoint.model_count }} models</span>
+          <span class="pill">{{ endpoint.in_flight_requests }}/{{ endpoint.max_concurrent_requests }}</span>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+</section>

@@ -11,12 +11,13 @@
 {{ amount }}
 {%- endif -%}
 {%- endmacro %}
-{% if not router_panel.endpoints %}
+{% set endpoint_list = endpoints if endpoints is defined else router_panel.endpoints %}
+{% if not endpoint_list %}
 <p class="empty">No backend connections configured yet.</p>
 {% endif %}
-{% for endpoint in router_panel.endpoints %}
-<details class="router-endpoint" data-persist-key="router-endpoint-{{ endpoint.endpoint_id }}">
-  <summary class="router-endpoint-summary">
+{% for endpoint in endpoint_list %}
+<article class="router-endpoint">
+  <div class="router-endpoint-summary" data-router-modal-open="router-endpoint-modal-{{ endpoint.endpoint_id }}" tabindex="0" role="button" aria-haspopup="dialog" aria-controls="router-endpoint-modal-{{ endpoint.endpoint_id }}">
     <div class="router-endpoint-main">
       <div class="router-endpoint-title">
         <code>{{ endpoint.base_url }}</code>
@@ -56,9 +57,21 @@
         <span class="router-activity-stat">{{ endpoint.in_flight_requests }}/{{ endpoint.max_concurrent_requests }}</span>
       </div>
     </div>
-  </summary>
+  </div>
+</article>
 
-  <div class="router-endpoint-body router-endpoint-detail">
+<div class="router-page-modal router-endpoint-modal" id="router-endpoint-modal-{{ endpoint.endpoint_id }}" hidden>
+  <div class="router-page-modal-backdrop" data-router-modal-close></div>
+  <section class="card router-page-modal-card router-endpoint-modal-card" role="dialog" aria-modal="true" aria-labelledby="router-endpoint-modal-title-{{ endpoint.endpoint_id }}">
+    <div class="card-topline">
+      <div>
+        <p class="section-kicker">URL</p>
+        <h2 id="router-endpoint-modal-title-{{ endpoint.endpoint_id }}"><code>{{ endpoint.base_url }}</code></h2>
+        <p class="metric-subtle">{{ endpoint.model_count }} model{% if endpoint.model_count != 1 %}s{% endif %} attached to this URL.</p>
+      </div>
+      <button class="secondary-button" type="button" data-router-modal-close{% if endpoint.source_kind != 'manual' %} data-router-modal-initial-focus{% endif %}>Close</button>
+    </div>
+    <div class="router-endpoint-body router-endpoint-detail">
     <div class="router-endpoint-detail-grid">
       <section class="router-detail-card">
         <p class="section-kicker">Overview</p>
@@ -99,7 +112,7 @@
             <input type="hidden" name="connection_base_url" value="{{ endpoint.base_url }}">
             <label>
               <span>API key</span>
-              <input type="password" name="connection_api_key" value="" placeholder="{{ 'Replace key' if endpoint.api_key_present else 'Set key' }}" autocomplete="off">
+              <input type="password" name="connection_api_key" value="" placeholder="{{ 'Replace key' if endpoint.api_key_present else 'Set key' }}" autocomplete="off" data-router-modal-initial-focus>
             </label>
             <button class="secondary-button" type="submit">{{ 'Update key' if endpoint.api_key_present else 'Save key' }}</button>
           </form>
@@ -288,6 +301,7 @@
       <div class="router-empty-card">No models attached to this URL yet.</div>
       {% endif %}
     </div>
-  </div>
-</details>
+    </div>
+  </section>
+</div>
 {% endfor %}

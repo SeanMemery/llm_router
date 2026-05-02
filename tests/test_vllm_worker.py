@@ -7,6 +7,7 @@ import pytest
 from vllm_worker import (
     DEFAULT_VLLM_MAX_CONCURRENCY,
     _build_vllm_command,
+    _normalize_router_url,
     _resolve_model_identity,
 )
 
@@ -72,3 +73,16 @@ def test_build_vllm_command_maps_parallel_env(monkeypatch: pytest.MonkeyPatch) -
     assert "8192" in command
     assert "--max-num-seqs" in command
     assert str(DEFAULT_VLLM_MAX_CONCURRENCY) in command
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("http://router:8788", "http://router:8788"),
+        ("http://router:8788/v1", "http://router:8788"),
+        ("https://router.example/public", "https://router.example"),
+        ("https://router.example/public/v1", "https://router.example"),
+    ],
+)
+def test_normalize_router_url(raw: str, expected: str) -> None:
+    assert _normalize_router_url(raw) == expected

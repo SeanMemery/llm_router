@@ -1,22 +1,14 @@
-<details class="router-public-card" data-persist-key="router-public-access">
-  <summary class="router-public-summary">
-    <div class="router-public-main">
-      <p class="section-kicker">Public URL</p>
-      {% if router_panel.public_access.public_base_url %}
-      <div class="router-public-url-row">
-        <code class="router-public-url">{{ router_panel.public_access.public_base_url }}</code>
-      </div>
-      {% else %}
-      <p class="metric-subtle">No public URL configured.</p>
-      {% endif %}
+<section class="router-public-card">
+  <div class="router-public-main">
+    <p class="section-kicker">Public URL</p>
+    {% if router_panel.public_access.public_base_url %}
+    <div class="router-public-url-row">
+      <code class="router-public-url">{{ router_panel.public_access.public_base_url }}</code>
     </div>
-    <div class="router-public-summary-actions">
-      <span class="pill {% if router_panel.public_access.active %}status-running{% else %}status-failed{% endif %}">
-        {{ router_panel.public_access.status_label }}
-      </span>
-      <span class="pill">Config</span>
-    </div>
-  </summary>
+    {% else %}
+    <p class="metric-subtle">No public URL configured.</p>
+    {% endif %}
+  </div>
   <div class="router-public-menu">
     <form method="post" action="/router/public-access" class="router-public-form">
       <input type="hidden" name="next" value="/">
@@ -54,4 +46,4 @@
     <p class="metric-subtle">{{ router_panel.public_access.last_error }}</p>
     {% endif %}
   </div>
-</details>
+</section>

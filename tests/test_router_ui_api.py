@@ -51,8 +51,6 @@ def test_router_panel_and_history_endpoints_return_cached_payloads(tmp_path: Pat
         assert panel_payload["base_url"] == "http://router.example:8788"
         assert "total_in_flight_requests" in panel_payload
         assert "total_output_tokens_per_second" in panel_payload
-        assert "modal_launches" in panel_payload
-        assert "modal_model_options" in panel_payload
 
         history = client.get("/api/router/history")
         assert history.status_code == 200
@@ -60,71 +58,6 @@ def test_router_panel_and_history_endpoints_return_cached_payloads(tmp_path: Pat
         assert history_payload["window_seconds"] == 3600
         assert history_payload["throughput_unit"] == "tokens_per_second"
         assert isinstance(history_payload["points"], list)
-
-
-def test_modal_worker_launch_and_stop_round_trip(tmp_path: Path, monkeypatch) -> None:
-    app = create_router_app(layout=_layout(tmp_path))
-
-    class _FakeProcess:
-        def __init__(self, *_args, **_kwargs) -> None:
-            self.pid = 43210
-
-    killed: list[int] = []
-    stopped_apps: list[str] = []
-
-    monkeypatch.setattr(router_app.importlib.util, "find_spec", lambda name: object() if name == "modal" else None)
-    monkeypatch.setattr(router_app.subprocess, "Popen", lambda *args, **kwargs: _FakeProcess())
-    monkeypatch.setattr(router_app, "_pid_is_alive", lambda pid: True)
-    monkeypatch.setattr(router_app, "_router_public_access_payload", lambda layout: {})
-    monkeypatch.setattr(router_app.os, "killpg", lambda pid, sig: killed.append(pid))
-    monkeypatch.setattr(
-        router_app,
-        "_stop_modal_launch_app",
-        lambda *, layout, launch_id, modal_app_id: (stopped_apps.append(modal_app_id or "") or True, None),
-    )
-
-    with TestClient(app) as client:
-        start = client.post(
-            "/router/modal-workers/start",
-            data={
-                "next": "/",
-                "modal_model": "Qwen/Qwen3.6-35B-A3B-FP8",
-                "modal_duration_minutes": "45",
-            },
-            follow_redirects=False,
-        )
-        assert start.status_code == 303
-
-        panel = client.get("/api/router/panel")
-        assert panel.status_code == 200
-        payload = panel.json()
-        assert len(payload["modal_launches"]) == 1
-        launch = payload["modal_launches"][0]
-        assert launch["display_name"].startswith("modal-")
-        assert launch["model"] == "Qwen/Qwen3.6-35B-A3B-FP8"
-        assert launch["status"] == "starting"
-        assert launch["metadata"]["execution_mode"] == "vllm"
-
-        launch_state_path = tmp_path / "project" / "data" / "dashboard" / "modal_workers" / f"{launch['launch_id']}.state.json"
-        launch_state_path.parent.mkdir(parents=True, exist_ok=True)
-        launch_state_path.write_text(
-            '{"app_id":"ap-test-123","execution_mode":"vllm","state":"registered","worker_id":"worker-123"}\n',
-            encoding="utf-8",
-        )
-
-        stop = client.post(
-            f"/router/modal-workers/{launch['launch_id']}/stop",
-            data={"next": "/"},
-            follow_redirects=False,
-        )
-        assert stop.status_code == 303
-        assert killed == [43210]
-        assert stopped_apps == ["ap-test-123"]
-
-        panel_after = client.get("/api/router/panel")
-        assert panel_after.status_code == 200
-        assert panel_after.json()["modal_launches"] == []
-
 
 def test_modal_launch_reconcile_marks_stopped_when_modal_app_is_not_live(
     tmp_path: Path,

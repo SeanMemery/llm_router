@@ -15,25 +15,39 @@
     {% endif %}
 
     <div class="router-home-layout">
+      <aside class="router-side-rail">
+        <div class="router-column" id="router-live-public-access">{% include "_router_public_access.html" %}</div>
+        <div class="router-column" id="router-live-stats">{% include "_router_stats.html" %}</div>
+      </aside>
+
       <section class="card router-panel">
         <div class="card-topline router-panel-topline">
           <div class="router-header-main">
             <div class="router-header-title-row">
               <p class="section-kicker">LLM Router</p>
             </div>
-            <div class="router-header-meta">
-              <span class="router-header-meta-item">
-                <span class="router-header-meta-label">URL</span>
-                <code>{{ router_panel.base_url }}</code>
-              </span>
-              <span class="router-header-meta-item">
-                <span class="router-header-meta-label">Model</span>
-                <code>{{ router_panel.shared_model }}</code>
-              </span>
-            </div>
           </div>
           <div class="router-header-actions">
-            <div class="router-summary-live router-summary-pills" id="router-summary-live">{% include "_router_summary.html" %}</div>
+            <button class="secondary-button" type="button" id="router-add-model-open">Add model</button>
+            <a class="pill pill-link {% if router_panel.error_count > 0 %}pill-error{% endif %}" href="/router/errors">Errors {{ router_panel.error_count }}</a>
+            <details class="router-settings-menu" id="router-settings-menu">
+              <summary class="pill pill-refresh pill-refresh-compact">Settings</summary>
+              <div class="router-settings-popover">
+                <div class="router-settings-section">
+                  <span class="router-settings-label">Endpoints</span>
+                  <label class="router-settings-checkbox" for="endpoint-support-modal">
+                    <input
+                      id="endpoint-support-modal"
+                      type="checkbox"
+                      data-endpoint-support-toggle="modal"
+                      data-persist-key="endpoint-support-modal"
+                      checked
+                    >
+                    <span>Modal</span>
+                  </label>
+                </div>
+              </div>
+            </details>
             <details class="refresh-menu" id="refresh-menu">
               <summary class="pill pill-refresh pill-refresh-compact" id="rendered-at">{{ router_panel.rendered_at }}</summary>
               <div class="refresh-popover" id="refresh-popover">
@@ -47,16 +61,11 @@
           </div>
         </div>
 
-        <div class="router-column" id="router-live-public-access">{% include "_router_public_access.html" %}</div>
-
         <details class="router-metrics-card" data-persist-key="router-metrics-card" open>
           <summary class="router-metrics-summary">
             <div>
               <p class="section-kicker">Router Activity</p>
-              <h3>In-flight requests and throughput</h3>
-              <p class="metric-subtle">Last 1 hour. Left axis: in-flight requests. Right axis: throughput (tokens/sec).</p>
             </div>
-            <span class="pill">Toggle</span>
           </summary>
           <div class="router-metrics-chart-shell">
             <div class="router-metrics-legend">
@@ -67,49 +76,61 @@
           </div>
         </details>
 
-        <div class="router-column router-add-card">
-          <form method="post" action="/router/connections" class="router-add-form">
-            <input type="hidden" name="next" value="/">
-            <div class="router-add-grid">
-              <label>
-                <span>Base URL</span>
-                <input type="text" name="connection_base_url" value="">
-              </label>
-              <label>
-                <span>API key</span>
-                <input type="password" name="connection_api_key" value="" autocomplete="off">
-              </label>
-              <label>
-                <span>Model</span>
-                <input class="input-model-id" type="text" name="connection_model" value="">
-              </label>
-              <label>
-                <span>Parallel</span>
-                <input class="input-parallel" type="number" min="1" name="connection_max_concurrent" value="1">
-              </label>
-              <label>
-                <span>Priority</span>
-                <input class="input-parallel" type="number" min="1" max="99" name="connection_priority" value="2">
-              </label>
-              <label class="router-add-toggle-field">
-                <span>Images</span>
-                <span class="router-toggle">
-                  <input class="router-toggle-input" type="checkbox" name="connection_supports_images" value="1" checked>
-                  <span class="router-toggle-box">Images</span>
-                </span>
-              </label>
-              <div class="router-actions router-add-submit">
-                <button class="secondary-button" type="submit">Add URL</button>
-              </div>
-            </div>
-          </form>
-        </div>
-
         <div class="router-column" id="router-live-workers">{% include "_router_workers.html" %}</div>
       </section>
 
       <aside class="card router-request-rail" id="router-live-requests">{% include "_router_requests_panel.html" %}</aside>
     </div>
+
+    <div class="router-page-modal" id="router-add-model-modal" hidden>
+      <div class="router-page-modal-backdrop" data-router-modal-close></div>
+      <section class="card router-page-modal-card" role="dialog" aria-modal="true" aria-labelledby="router-add-model-title">
+        <div class="card-topline">
+          <div>
+            <p class="section-kicker">Router</p>
+            <h2 id="router-add-model-title">Add model</h2>
+            <p class="metric-subtle">Add a URL-backed model endpoint to the router.</p>
+          </div>
+          <button class="secondary-button" type="button" data-router-modal-close>Close</button>
+        </div>
+        <form method="post" action="/router/connections" class="router-add-form router-add-form-modal">
+          <input type="hidden" name="next" value="/">
+          <div class="router-add-grid">
+            <label>
+              <span>Base URL</span>
+              <input type="text" name="connection_base_url" value="" data-router-add-model-first-field>
+            </label>
+            <label>
+              <span>API key</span>
+              <input type="password" name="connection_api_key" value="" autocomplete="off">
+            </label>
+            <label>
+              <span>Model</span>
+              <input class="input-model-id" type="text" name="connection_model" value="">
+            </label>
+            <label>
+              <span>Parallel</span>
+              <input class="input-parallel" type="number" min="1" name="connection_max_concurrent" value="1">
+            </label>
+            <label>
+              <span>Priority</span>
+              <input class="input-parallel" type="number" min="1" max="99" name="connection_priority" value="2">
+            </label>
+            <label class="router-add-toggle-field">
+              <span>Images</span>
+              <span class="router-toggle">
+                <input class="router-toggle-input" type="checkbox" name="connection_supports_images" value="1" checked>
+                <span class="router-toggle-box">Images</span>
+              </span>
+            </label>
+            <div class="router-actions router-add-submit">
+              <button class="secondary-button" type="submit">Add model</button>
+            </div>
+          </div>
+        </form>
+      </section>
+    </div>
+
   </main>
   <script id="router-history-data" type="application/json">{{ router_history | tojson }}</script>
   <script>
@@ -138,6 +159,7 @@
       const storageKey = `llm-router-page-state:${window.location.pathname}`;
       const fieldSelector = 'input:not([type="hidden"]), textarea, select';
       const detailsSelector = 'details.router-endpoint, details[data-persist-key]';
+      const endpointSupportToggleSelector = '[data-endpoint-support-toggle]';
 
       const fieldKey = (field, index) => {
         const persistKey = field.dataset.persistKey;
@@ -200,17 +222,65 @@
         }
       };
 
+      const applyEndpointVisibility = () => {
+        const toggles = Array.from(document.querySelectorAll(endpointSupportToggleSelector));
+        toggles.forEach((toggle) => {
+          if (!(toggle instanceof HTMLInputElement)) return;
+          const supportName = toggle.dataset.endpointSupportToggle;
+          if (!supportName) return;
+          const enabled = toggle.checked;
+          Array.from(document.querySelectorAll(`[data-endpoint-support="${supportName}"]`)).forEach((section) => {
+            if (!(section instanceof HTMLElement)) return;
+            section.hidden = !enabled;
+          });
+        });
+      };
+
+      const requestListScrollState = () => {
+        const requestList = requestsLive?.querySelector(".router-request-list");
+        if (!(requestList instanceof HTMLElement)) {
+          return null;
+        }
+        return {
+          scrollTop: requestList.scrollTop,
+          scrollLeft: requestList.scrollLeft,
+        };
+      };
+
+      const restoreRequestListScroll = (state) => {
+        if (!state) {
+          return;
+        }
+        const requestList = requestsLive?.querySelector(".router-request-list");
+        if (!(requestList instanceof HTMLElement)) {
+          return;
+        }
+        requestList.scrollTop = state.scrollTop;
+        requestList.scrollLeft = state.scrollLeft;
+      };
+
       restoreState();
+      applyEndpointVisibility();
 
       document.addEventListener("input", saveState, { passive: true });
       document.addEventListener("change", saveState, { passive: true });
+      document.addEventListener("change", (event) => {
+        const target = event.target;
+        if (!(target instanceof HTMLInputElement)) return;
+        if (!target.matches(endpointSupportToggleSelector)) return;
+        applyEndpointVisibility();
+      }, { passive: true });
       document.addEventListener("submit", saveState, { passive: true });
       window.addEventListener("beforeunload", saveState, { passive: true });
 
       let refreshTimer = null;
       const refreshIntervalInput = document.getElementById("refresh-interval");
-      const summaryLive = document.getElementById("router-summary-live");
+      const addModelOpenButton = document.getElementById("router-add-model-open");
+      const addModelModal = document.getElementById("router-add-model-modal");
+      const addModelFirstField = document.querySelector("[data-router-add-model-first-field]");
+      const settingsMenu = document.getElementById("router-settings-menu");
       const publicAccessLive = document.getElementById("router-live-public-access");
+      const statsLive = document.getElementById("router-live-stats");
       const workersLive = document.getElementById("router-live-workers");
       const requestsLive = document.getElementById("router-live-requests");
       const endpointsLive = document.getElementById("router-live-endpoints");
@@ -249,8 +319,16 @@
         const innerHeight = height - padding.top - padding.bottom;
         const minEpoch = Number(points[0]?.epoch_seconds || 0);
         const maxEpoch = Number(points[points.length - 1]?.epoch_seconds || minEpoch + 1);
-        const inflightMax = Math.max(1, ...points.map((item) => Number(item.in_flight_requests || 0)));
-        const throughputMax = Math.max(1, ...points.map((item) => Number(item.throughput || 0)));
+        const inflightStep = 5;
+        const inflightBandSize = 10;
+        const throughputStep = 250;
+        const throughputBandSize = 500;
+        const inflightObservedMax = Math.max(0, ...points.map((item) => Number(item.in_flight_requests || 0)));
+        const throughputObservedMax = Math.max(0, ...points.map((item) => Number(item.throughput || 0)));
+        const inflightBands = Math.max(1, Math.ceil(inflightObservedMax / inflightBandSize));
+        const throughputBands = Math.max(1, Math.ceil(throughputObservedMax / throughputBandSize));
+        const inflightMax = inflightBands * inflightBandSize;
+        const throughputMax = throughputBands * throughputBandSize;
         const xAt = (epoch) => {
           if (maxEpoch <= minEpoch) return padding.left;
           return padding.left + ((epoch - minEpoch) / (maxEpoch - minEpoch)) * innerWidth;
@@ -280,27 +358,43 @@
             <text x="${x}" y="${height - 8}" text-anchor="middle" class="router-metrics-axis-label">${escapeHtml(label)}</text>
           `;
         }).join("");
-        const leftTicks = Array.from({ length: 4 }, (_, index) => {
-          const value = (inflightMax * (3 - index)) / 3;
+        const leftTickCount = inflightMax / inflightStep;
+        const leftTicks = Array.from({ length: leftTickCount + 1 }, (_, index) => {
+          const value = inflightMax - (index * inflightStep);
           const y = yLeftAt(value).toFixed(2);
           return `
             <line x1="${padding.left}" y1="${y}" x2="${padding.left + innerWidth}" y2="${y}" class="router-metrics-gridline" />
             <text x="${padding.left - 10}" y="${Number(y) + 4}" text-anchor="end" class="router-metrics-axis-label">${escapeHtml(Math.round(value))}</text>
           `;
         }).join("");
-        const rightTicks = Array.from({ length: 4 }, (_, index) => {
-          const value = (throughputMax * (3 - index)) / 3;
+        const rightTickCount = throughputMax / throughputStep;
+        const rightTicks = Array.from({ length: rightTickCount + 1 }, (_, index) => {
+          const value = throughputMax - (index * throughputStep);
           const y = yRightAt(value).toFixed(2);
           return `<text x="${width - padding.right + 10}" y="${Number(y) + 4}" text-anchor="start" class="router-metrics-axis-label">${escapeHtml(Math.round(value))}</text>`;
         }).join("");
         chartRoot.innerHTML = `
-          <svg viewBox="0 0 ${width} ${height}" class="router-metrics-svg" role="img" aria-label="In-flight requests and throughput over the last hour">
+          <svg viewBox="0 0 ${width} ${height}" class="router-metrics-svg" role="img" aria-label="Router activity chart">
             ${timeTicks}
             ${leftTicks}
             ${rightTicks}
             <line x1="${padding.left}" y1="${padding.top + innerHeight}" x2="${padding.left + innerWidth}" y2="${padding.top + innerHeight}" class="router-metrics-axis" />
             <line x1="${padding.left}" y1="${padding.top}" x2="${padding.left}" y2="${padding.top + innerHeight}" class="router-metrics-axis" />
             <line x1="${padding.left + innerWidth}" y1="${padding.top}" x2="${padding.left + innerWidth}" y2="${padding.top + innerHeight}" class="router-metrics-axis" />
+            <text
+              x="18"
+              y="${padding.top + (innerHeight / 2)}"
+              text-anchor="middle"
+              transform="rotate(-90 18 ${padding.top + (innerHeight / 2)})"
+              class="router-metrics-axis-label"
+            >In-flight requests</text>
+            <text
+              x="${width - 18}"
+              y="${padding.top + (innerHeight / 2)}"
+              text-anchor="middle"
+              transform="rotate(90 ${width - 18} ${padding.top + (innerHeight / 2)})"
+              class="router-metrics-axis-label"
+            >Throughput (t/s)</text>
             <path d="${inflightPath}" class="router-metrics-line router-metrics-line-inflight" />
             <path d="${throughputPath}" class="router-metrics-line router-metrics-line-throughput" />
           </svg>
@@ -316,17 +410,19 @@
           });
           if (!response.ok) return;
           const payload = await response.json();
-          if (summaryLive && typeof payload.summary_html === "string") {
-            summaryLive.innerHTML = payload.summary_html;
-          }
+          const requestScrollState = requestListScrollState();
           if (publicAccessLive && typeof payload.public_access_html === "string") {
             publicAccessLive.innerHTML = payload.public_access_html;
+          }
+          if (statsLive && typeof payload.stats_html === "string") {
+            statsLive.innerHTML = payload.stats_html;
           }
           if (workersLive && typeof payload.workers_html === "string") {
             workersLive.innerHTML = payload.workers_html;
           }
           if (requestsLive && typeof payload.requests_html === "string") {
             requestsLive.innerHTML = payload.requests_html;
+            restoreRequestListScroll(requestScrollState);
           }
           if (endpointsLive && typeof payload.endpoints_html === "string") {
             endpointsLive.innerHTML = payload.endpoints_html;
@@ -338,6 +434,7 @@
             renderMetricsChart(payload.metrics_history);
           }
           restoreState();
+          applyEndpointVisibility();
         } catch {
           // Keep the current UI if a background refresh fails.
         }
@@ -377,6 +474,88 @@
         if (refreshMenu instanceof HTMLDetailsElement && refreshMenu.open && refreshIntervalInput) {
           refreshIntervalInput.focus();
           refreshIntervalInput.select();
+        }
+      });
+      let activeModal = null;
+      let activeModalTrigger = null;
+      const openModal = (modal, trigger = null, focusTarget = null) => {
+        if (!(modal instanceof HTMLElement)) return;
+        activeModal = modal;
+        activeModalTrigger = trigger instanceof HTMLElement ? trigger : null;
+        modal.hidden = false;
+        document.body.classList.add("router-modal-open");
+        window.requestAnimationFrame(() => {
+          if (focusTarget instanceof HTMLInputElement || focusTarget instanceof HTMLTextAreaElement) {
+            focusTarget.focus();
+            focusTarget.select();
+            return;
+          }
+          if (focusTarget instanceof HTMLElement) {
+            focusTarget.focus();
+          }
+        });
+      };
+      const closeModal = (modal = activeModal) => {
+        if (!(modal instanceof HTMLElement)) return;
+        modal.hidden = true;
+        if (!document.querySelector(".router-page-modal:not([hidden])")) {
+          document.body.classList.remove("router-modal-open");
+          if (activeModalTrigger instanceof HTMLElement) {
+            activeModalTrigger.focus();
+          }
+        }
+        if (modal === activeModal) {
+          activeModal = null;
+          activeModalTrigger = null;
+        }
+      };
+      addModelOpenButton?.addEventListener("click", () => openModal(addModelModal, addModelOpenButton, addModelFirstField));
+      document.addEventListener("click", (event) => {
+        const target = event.target;
+        if (!(target instanceof HTMLElement)) return;
+        if (target.matches("[data-router-modal-close]")) {
+          closeModal(target.closest(".router-page-modal"));
+          return;
+        }
+        const modalOpener = target.closest("[data-router-modal-open]");
+        if (modalOpener instanceof HTMLElement) {
+          if (target.closest("form, button, a, input, select, textarea, label")) {
+            return;
+          }
+          const modalId = modalOpener.dataset.routerModalOpen;
+          const modal = modalId ? document.getElementById(modalId) : null;
+          if (modal instanceof HTMLElement) {
+            const modalFocusTarget = modal.querySelector("[data-router-modal-initial-focus]");
+            openModal(modal, modalOpener, modalFocusTarget instanceof HTMLElement ? modalFocusTarget : null);
+          }
+        }
+      });
+      document.addEventListener("keydown", (event) => {
+        if (event.key === "Escape" && activeModal instanceof HTMLElement && !activeModal.hidden) {
+          closeModal(activeModal);
+          return;
+        }
+        if ((event.key === "Enter" || event.key === " ") && event.target instanceof HTMLElement) {
+          const modalOpener = event.target.closest("[data-router-modal-open]");
+          if (!(modalOpener instanceof HTMLElement)) {
+            return;
+          }
+          if (event.target.closest("form, button, a, input, select, textarea, label")) {
+            return;
+          }
+          const modalId = modalOpener.dataset.routerModalOpen;
+          const modal = modalId ? document.getElementById(modalId) : null;
+          if (modal instanceof HTMLElement) {
+            const modalFocusTarget = modal.querySelector("[data-router-modal-initial-focus]");
+            openModal(modal, modalOpener, modalFocusTarget instanceof HTMLElement ? modalFocusTarget : null);
+            event.preventDefault();
+          }
+        }
+      });
+      settingsMenu?.addEventListener("toggle", () => {
+        const modalToggle = document.getElementById("endpoint-support-modal");
+        if (settingsMenu instanceof HTMLDetailsElement && settingsMenu.open && modalToggle instanceof HTMLInputElement) {
+          modalToggle.focus();
         }
       });
       renderMetricsChart(metricsHistory);

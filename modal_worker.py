@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import argparse
 import concurrent.futures
 import importlib.util
@@ -40,14 +38,14 @@ except ModuleNotFoundError:
         return loaded
 
 
-DEFAULT_MODAL_MODEL = "Qwen/Qwen3.6-35B-A3B-FP8"
-DEFAULT_MODAL_GPU = "H100"
+DEFAULT_MODAL_MODEL = "RedHatAI/Qwen3.6-35B-A3B-NVFP4"
+DEFAULT_MODAL_GPU = "A100-40GB"
 DEFAULT_MODAL_MAX_MODEL_LEN = 8192
 DEFAULT_MODAL_MAX_TOKENS = 8192
 DEFAULT_MODAL_EXECUTION_MODE = "vllm"
 DEFAULT_MODAL_PYTHON_VERSION = "3.11"
 DEFAULT_MODAL_VLLM_VERSION = "0.19.1"
-DEFAULT_MODAL_TRANSFORMERS_VERSION = "5.5.4"
+DEFAULT_MODAL_TRANSFORMERS_SPEC = "git+https://github.com/huggingface/transformers.git"
 
 
 def _sleep_until(deadline_seconds: float, *, terminate_flag: callable) -> None:
@@ -130,19 +128,18 @@ def _stop_modal_app(*, python_executable: str, app_id: str | None) -> None:
 
 _MODAL_SPEC = importlib.util.find_spec("modal")
 _MODAL: Any | None = None
-MODAL_APP: Any | None = None
 if _MODAL_SPEC is not None:
     import modal as _modal
 
     _MODAL = _modal
-    MODAL_APP = _MODAL.App("llm-router-modal-worker")
     MODAL_TEST_IMAGE = _MODAL.Image.debian_slim(python_version=DEFAULT_MODAL_PYTHON_VERSION)
     MODAL_VLLM_IMAGE = (
-        _MODAL.Image.from_registry("vllm/vllm-openai:nightly", add_python=DEFAULT_MODAL_PYTHON_VERSION)
+        _MODAL.Image.from_registry("vllm/vllm-openai:latest", add_python=DEFAULT_MODAL_PYTHON_VERSION)
+        .apt_install("git")
         .entrypoint([])
         .run_commands(
             "uv pip install --system --upgrade "
-            f"huggingface-hub transformers=={DEFAULT_MODAL_TRANSFORMERS_VERSION} "
+            f"huggingface-hub {DEFAULT_MODAL_TRANSFORMERS_SPEC} "
             f"vllm=={DEFAULT_MODAL_VLLM_VERSION}",
         )
         .env({"HF_XET_HIGH_PERFORMANCE": "1"})
@@ -150,19 +147,34 @@ if _MODAL_SPEC is not None:
     MODAL_HF_CACHE = _MODAL.Volume.from_name("huggingface-cache", create_if_missing=True)
     MODAL_VLLM_CACHE = _MODAL.Volume.from_name("vllm-cache", create_if_missing=True)
 
-    @MODAL_APP.cls(
+
+def _build_modal_runtime(
+    *,
+    modal: Any,
+    model_name: str,
+    app_name: str,
+    execution_mode: str,
+    gpu_kind: str,
+    max_model_len: int,
+    default_max_tokens: int,
+) -> tuple[Any, Any]:
+    if _MODAL is None:
+        raise SystemExit("Modal is not installed in this environment.")
+    app = modal.App(app_name)
+
+    @app.cls(
         image=MODAL_TEST_IMAGE,
         timeout=300,
+        serialized=True,
     )
     class ModalTestServer:
-        def __init__(self, model_name: str) -> None:
-            self._configured_model_name = model_name
+        configured_model_name: str = modal.parameter()
 
-        @_MODAL.enter()
+        @modal.enter()
         def start(self) -> None:
-            self._model_name = self._configured_model_name
+            self._model_name = self.configured_model_name
 
-        @_MODAL.method()
+        @modal.method()
         def ready(self) -> dict[str, Any]:
             return {
                 "status": "ready",
@@ -170,7 +182,7 @@ if _MODAL_SPEC is not None:
                 "execution_mode": "test",
             }
 
-        @_MODAL.method()
+        @modal.method()
         def process(self, payload: dict[str, Any]) -> dict[str, Any]:
             messages = payload.get("messages")
             prompt_preview = ""
@@ -210,33 +222,36 @@ if _MODAL_SPEC is not None:
                 },
             }
 
-    @MODAL_APP.cls(
+    @app.cls(
         image=MODAL_VLLM_IMAGE,
-        gpu=DEFAULT_MODAL_GPU,
+        gpu=gpu_kind,
         volumes={
             "/root/.cache/huggingface": MODAL_HF_CACHE,
             "/root/.cache/vllm": MODAL_VLLM_CACHE,
         },
         timeout=600,
+        serialized=True,
     )
     class ModalVllmServer:
-        def __init__(self, model_name: str, max_model_len: int, default_max_tokens: int) -> None:
-            self._configured_model_name = model_name
-            self._configured_max_model_len = max_model_len
-            self._configured_default_max_tokens = default_max_tokens
+        configured_model_name: str = modal.parameter()
+        configured_max_model_len: int = modal.parameter()
+        configured_default_max_tokens: int = modal.parameter()
 
-        @_MODAL.enter()
+        @modal.enter()
         def start(self) -> None:
             import vllm
 
-            self._model_name = self._configured_model_name
-            self._default_max_tokens = self._configured_default_max_tokens
-            self._llm = vllm.LLM(
-                model=self._configured_model_name,
-                max_model_len=self._configured_max_model_len,
-                attention_backend="flashinfer",
-                async_scheduling=True,
-            )
+            self._model_name = self.configured_model_name
+            self._default_max_tokens = self.configured_default_max_tokens
+            llm_kwargs: dict[str, Any] = {
+                "model": self.configured_model_name,
+                "max_model_len": self.configured_max_model_len,
+                "attention_backend": "flashinfer",
+                "async_scheduling": True,
+            }
+            if str(self.configured_model_name).startswith("RedHatAI/"):
+                llm_kwargs["moe_backend"] = "marlin"
+            self._llm = vllm.LLM(**llm_kwargs)
             self._sampling_params = self._llm.get_default_sampling_params()
             self._sampling_params.temperature = 0.0
             self._sampling_params.max_tokens = self._default_max_tokens
@@ -246,12 +261,8 @@ if _MODAL_SPEC is not None:
             except Exception:
                 tokenizer = None
             self._tokenizer = tokenizer
-            self._llm.chat(
-                [[{"role": "user", "content": "Hello"}]],
-                sampling_params=self._sampling_params,
-            )
 
-        @_MODAL.method()
+        @modal.method()
         def ready(self) -> dict[str, Any]:
             return {
                 "status": "ready",
@@ -320,7 +331,7 @@ if _MODAL_SPEC is not None:
             except Exception:
                 return max(1, len(text.split()) or 1)
 
-        @_MODAL.method()
+        @modal.method()
         def process(self, payload: dict[str, Any]) -> dict[str, Any]:
             messages = self._normalize_messages(payload)
             sampling_params = self._sampling_params.clone()
@@ -374,27 +385,17 @@ if _MODAL_SPEC is not None:
                 },
                 "router": {
                     "worker_execution_mode": "modal",
-                    "modal_gpu": DEFAULT_MODAL_GPU,
+                    "modal_gpu": gpu_kind,
                 },
             }
 
-
-def _build_modal_runtime(
-    *,
-    modal: Any,
-    model_name: str,
-    app_name: str,
-    execution_mode: str,
-    gpu_kind: str,
-    max_model_len: int,
-    default_max_tokens: int,
-) -> tuple[Any, Any]:
-    del modal, app_name, gpu_kind
-    if MODAL_APP is None:
-        raise SystemExit("Modal is not installed in this environment.")
     if execution_mode == "test":
-        return MODAL_APP, ModalTestServer(model_name)
-    return MODAL_APP, ModalVllmServer(model_name, max_model_len, default_max_tokens)
+        return app, ModalTestServer(configured_model_name=model_name)
+    return app, ModalVllmServer(
+        configured_model_name=model_name,
+        configured_max_model_len=max_model_len,
+        configured_default_max_tokens=default_max_tokens,
+    )
 
 
 def main() -> int:

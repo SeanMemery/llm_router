@@ -88,6 +88,15 @@ class RouterRequestStore:
             status = str(item.get("status") or "").strip() or "failed"
             if not request_id:
                 continue
+            detail_path = self._detail_path(request_id)
+            if detail_path.is_file():
+                try:
+                    detail_payload = json.loads(detail_path.read_text(encoding="utf-8"))
+                except Exception:
+                    detail_payload = None
+                if isinstance(detail_payload, dict):
+                    loaded.append(self._summarize(detail_payload))
+                    continue
             loaded.append(
                 {
                     "id": request_id,
@@ -157,7 +166,9 @@ class RouterRequestStore:
             completion_tokens = None
         status = str(entry.get("status") or "").strip() or "failed"
         timestamp = str(entry.get("completed_at") or entry.get("started_at") or "").strip()
-        duration_seconds = timing.get("router_request_seconds")
+        duration_seconds = timing.get("upstream_request_seconds")
+        if not isinstance(duration_seconds, (int, float)):
+            duration_seconds = timing.get("router_request_seconds")
         if not isinstance(duration_seconds, (int, float)):
             duration_seconds = None
         return {
@@ -240,4 +251,5 @@ class RouterRequestStore:
                 return None
             if not isinstance(payload, dict):
                 return None
+            payload["summary"] = self._summarize(payload)
             return payload
