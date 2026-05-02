@@ -97,7 +97,8 @@ def _request_log_window_metrics(
     duration_samples = [item["duration_seconds"] for item in metrics_samples]
     total_completion_tokens = sum(item["completion_tokens"] for item in metrics_samples)
     total_duration_seconds = sum(duration_samples)
-    average_throughput = (total_completion_tokens / total_duration_seconds) if total_duration_seconds > 0.0 else 0.0
+    window_seconds = max(REQUEST_LOG_THROUGHPUT_WINDOW.total_seconds(), 1.0)
+    average_throughput = total_completion_tokens / window_seconds
     average_request_seconds = (
         sum(duration_samples) / len(duration_samples)
         if duration_samples
@@ -172,11 +173,11 @@ def _history_with_request_log_throughput(
         )
         ]
         total_completion_tokens = sum(item["completion_tokens"] for item in throughput_samples)
-        total_duration_seconds = sum(item["duration_seconds"] for item in throughput_samples)
+        window_seconds = max(REQUEST_LOG_THROUGHPUT_WINDOW.total_seconds(), 1.0)
         point["throughput"] = round(
-            total_completion_tokens / total_duration_seconds,
+            total_completion_tokens / window_seconds,
             3,
-        ) if total_duration_seconds > 0.0 else 0.0
+        ) if throughput_samples else 0.0
         next_points.append(point)
     next_history["points"] = next_points
     return next_history

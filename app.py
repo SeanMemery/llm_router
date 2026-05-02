@@ -1929,9 +1929,8 @@ def _request_log_total_throughput(
         total_completion_tokens += float(completion_tokens)
         total_duration_seconds += duration
         sample_count += 1
-    if total_duration_seconds <= 0.0:
-        return 0.0, 0.0, sample_count
-    throughput = total_completion_tokens / total_duration_seconds
+    window_seconds = max(float(window.total_seconds()), 1.0)
+    throughput = total_completion_tokens / window_seconds
     average_request_seconds = total_duration_seconds / sample_count if sample_count > 0 else 0.0
     return throughput, average_request_seconds, sample_count
 

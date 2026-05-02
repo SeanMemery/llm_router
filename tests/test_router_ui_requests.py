@@ -35,7 +35,7 @@ def test_request_log_window_metrics_uses_total_tokens_over_total_duration() -> N
         now=datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc),
     )
 
-    assert metrics["request_log_output_tokens_per_second"] == 37.5
+    assert metrics["request_log_output_tokens_per_second"] == 0.25
     assert metrics["request_log_average_request_seconds"] == 2.0
     assert metrics["request_log_sample_count"] == 2
 
@@ -79,8 +79,8 @@ def test_history_uses_request_log_throughput_for_each_point() -> None:
         },
     )
 
-    assert history["points"][0]["throughput"] == 40.0
-    assert history["points"][1]["throughput"] == 37.5
+    assert history["points"][0]["throughput"] == 0.2
+    assert history["points"][1]["throughput"] == 0.25
 
 
 def test_router_ui_home_includes_request_panel(monkeypatch) -> None:
@@ -219,7 +219,7 @@ def test_router_ui_home_includes_request_panel(monkeypatch) -> None:
         assert "0.4 s" in home.text
         assert 'data-endpoint-support-toggle="modal"' in home.text
         assert 'data-endpoint-support="modal"' in home.text
-        assert "50.0 t/s" in home.text
+        assert "0.03 t/s" in home.text
         assert "In-flight requests and throughput" not in home.text
         assert "Last 1 hour. Left axis: in-flight requests. Right axis: throughput (tokens/sec)." not in home.text
         assert 'id="router-summary-live"' not in home.text
@@ -322,5 +322,5 @@ def test_router_live_returns_request_log_throughput_history(monkeypatch) -> None
         live = client.get("/router/live")
         assert live.status_code == 200
         payload = live.json()
-        assert payload["metrics_history"]["points"][0]["throughput"] == 40.0
-        assert payload["metrics_history"]["points"][1]["throughput"] == 37.5
+        assert payload["metrics_history"]["points"][0]["throughput"] == 0.2
+        assert payload["metrics_history"]["points"][1]["throughput"] == 0.25
