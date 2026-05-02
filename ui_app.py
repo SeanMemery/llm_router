@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -17,6 +17,7 @@ from fastapi.templating import Jinja2Templates
 
 BACKEND_BASE_URL = os.getenv("LLM_ROUTER_BACKEND_URL", "http://127.0.0.1:8788").rstrip("/")
 ROUTER_DISPLAY_TIMEZONE = ZoneInfo("Europe/London")
+REQUEST_LOG_THROUGHPUT_WINDOW = timedelta(minutes=10)
 HOP_BY_HOP_HEADERS = {
     "connection",
     "content-length",
@@ -64,6 +65,121 @@ def _request_timestamp_label(value: str | None) -> str:
     except ValueError:
         return value
     return parsed.astimezone(ROUTER_DISPLAY_TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _parse_request_timestamp(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _request_log_window_metrics(
+    requests: dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    entries = requests.get("requests")
+    if not isinstance(entries, list):
+        entries = []
+    window_end = now.astimezone(timezone.utc) if now is not None else _utc_now()
+    cutoff = window_end - REQUEST_LOG_THROUGHPUT_WINDOW
+    metrics_samples = _request_log_metric_samples(entries=entries, cutoff=cutoff, window_end=window_end)
+    duration_samples = [item["duration_seconds"] for item in metrics_samples]
+    total_completion_tokens = sum(item["completion_tokens"] for item in metrics_samples)
+    total_duration_seconds = sum(duration_samples)
+    average_throughput = (total_completion_tokens / total_duration_seconds) if total_duration_seconds > 0.0 else 0.0
+    average_request_seconds = (
+        sum(duration_samples) / len(duration_samples)
+        if duration_samples
+        else 0.0
+    )
+    return {
+        "request_log_output_tokens_per_second": round(average_throughput, 2),
+        "request_log_average_request_seconds": round(average_request_seconds, 2),
+        "request_log_sample_count": len(metrics_samples),
+        "request_log_window_minutes": int(REQUEST_LOG_THROUGHPUT_WINDOW.total_seconds() // 60),
+    }
+
+
+def _request_log_metric_samples(
+    *,
+    entries: list[dict[str, Any]],
+    cutoff: datetime,
+    window_end: datetime,
+) -> list[dict[str, float]]:
+    metric_samples: list[dict[str, float]] = []
+    for item in entries:
+        if not isinstance(item, dict):
+            continue
+        timestamp = _parse_request_timestamp(str(item.get("timestamp") or "").strip())
+        if timestamp is None or timestamp < cutoff or timestamp > window_end:
+            continue
+        completion_tokens = item.get("completion_tokens")
+        duration_seconds = item.get("duration_seconds")
+        if not isinstance(completion_tokens, (int, float)):
+            continue
+        if not isinstance(duration_seconds, (int, float)):
+            continue
+        resolved_duration = float(duration_seconds)
+        if resolved_duration <= 0.0:
+            continue
+        metric_samples.append(
+            {
+                "duration_seconds": resolved_duration,
+                "completion_tokens": float(completion_tokens),
+                "throughput": float(completion_tokens) / resolved_duration,
+            }
+        )
+    return metric_samples
+
+
+def _history_with_request_log_throughput(
+    *,
+    history: dict[str, Any],
+    requests: dict[str, Any],
+) -> dict[str, Any]:
+    points = history.get("points")
+    entries = requests.get("requests")
+    if not isinstance(points, list) or not isinstance(entries, list):
+        return history
+    next_history = dict(history)
+    next_points: list[dict[str, Any]] = []
+    for item in points:
+        if not isinstance(item, dict):
+            continue
+        point = dict(item)
+        timestamp = _parse_request_timestamp(str(point.get("timestamp") or "").strip())
+        if timestamp is None:
+            next_points.append(point)
+            continue
+        cutoff = timestamp - REQUEST_LOG_THROUGHPUT_WINDOW
+        throughput_samples = [
+            item
+            for item in _request_log_metric_samples(
+            entries=entries,
+            cutoff=cutoff,
+            window_end=timestamp,
+        )
+        ]
+        total_completion_tokens = sum(item["completion_tokens"] for item in throughput_samples)
+        total_duration_seconds = sum(item["duration_seconds"] for item in throughput_samples)
+        point["throughput"] = round(
+            total_completion_tokens / total_duration_seconds,
+            3,
+        ) if total_duration_seconds > 0.0 else 0.0
+        next_points.append(point)
+    next_history["points"] = next_points
+    return next_history
 
 
 def _normalize_request_entries(
@@ -284,12 +400,28 @@ def _router_context(
     requests: dict[str, Any],
 ) -> dict[str, Any]:
     normalized_requests = _normalize_request_entries(panel=panel, requests=requests)
+    history_with_request_log_throughput = _history_with_request_log_throughput(
+        history=history,
+        requests=normalized_requests,
+    )
+    request_log_metrics = _request_log_window_metrics(normalized_requests)
+    panel_with_request_metrics = dict(panel)
+    panel_with_request_metrics.update(request_log_metrics)
+    panel_with_request_metrics["total_output_tokens_per_second"] = request_log_metrics[
+        "request_log_output_tokens_per_second"
+    ]
+    panel_with_request_metrics["average_output_tokens_per_second"] = request_log_metrics[
+        "request_log_output_tokens_per_second"
+    ]
+    panel_with_request_metrics["average_request_seconds"] = request_log_metrics[
+        "request_log_average_request_seconds"
+    ]
     return {
-        "router_panel": panel,
-        "router_history": history,
+        "router_panel": panel_with_request_metrics,
+        "router_history": history_with_request_log_throughput,
         "router_requests": normalized_requests,
         "page_title": "LLM Router",
-        "error_count": int(panel.get("error_count") or 0),
+        "error_count": int(panel_with_request_metrics.get("error_count") or 0),
     }
 
 
@@ -332,6 +464,9 @@ def create_router_ui_app() -> FastAPI:
                 "worker_connections": [],
                 "worker_counts": {"online": 0, "offline": 0, "total": 0},
                 "waiting_requests": 0,
+                "modal_connections": [],
+                "modal_model_options": [],
+                "modal_gpu_options": [],
                 "total_tokens_label": "0",
                 "average_request_seconds": 0.0,
                 "average_output_tokens_per_second": 0.0,
@@ -378,11 +513,12 @@ def create_router_ui_app() -> FastAPI:
             {
                 "summary_html": templates.env.get_template("_router_summary.html").render(context),
                 "public_access_html": templates.env.get_template("_router_public_access.html").render(context),
+                "stats_html": templates.env.get_template("_router_stats.html").render(context),
                 "workers_html": templates.env.get_template("_router_workers.html").render(context),
                 "endpoints_html": templates.env.get_template("_router_live.html").render(context),
                 "requests_html": templates.env.get_template("_router_requests_panel.html").render(context),
                 "rendered_at": panel.get("rendered_at"),
-                "metrics_history": history,
+                "metrics_history": context["router_history"],
             }
         )
 

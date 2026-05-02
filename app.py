@@ -46,6 +46,12 @@ from modal_worker_store import (
     load_modal_worker_launches,
     save_modal_worker_launches,
 )
+from modal_connection_store import (
+    ModalConnectionRecord,
+    ModalConnectionStatus,
+    load_modal_connections,
+    save_modal_connections,
+)
 from paths import ArtifactLayout, get_artifact_layout
 from vast_instance_store import (
     VastInstanceRecord,
@@ -79,6 +85,7 @@ ROUTER_METRICS_SAMPLE_INTERVAL_SECONDS = max(
     5.0,
     float(os.getenv("ROUTER_METRICS_SAMPLE_INTERVAL_SECONDS", "10")),
 )
+ROUTER_THROUGHPUT_WINDOW = timedelta(minutes=10)
 ROUTER_REQUEST_LOG_MAX_ENTRIES = max(
     100,
     int(os.getenv("ROUTER_REQUEST_LOG_MAX_ENTRIES", "1000")),
@@ -115,6 +122,32 @@ DEFAULT_VAST_PREFERRED_HOST_IDS = {228989, 148689, 51981, 67245}
 DEFAULT_VAST_MANAGED_BASE_URLS = {
     "http://209.146.116.50:36413",
     "http://209.146.116.50:36468",
+}
+DEFAULT_MODAL_CONNECTION_MODEL = "RedHatAI/Qwen3.6-35B-A3B-NVFP4"
+DEFAULT_MODAL_CONNECTION_GPU = "L40S"
+DEFAULT_MODAL_CONNECTION_SERVED_MODEL_NAME = "llm"
+DEFAULT_MODAL_CONNECTION_MAX_MODEL_LEN = 8192
+DEFAULT_MODAL_CONNECTION_MAX_CONCURRENT = 8
+DEFAULT_MODAL_CONNECTION_PRIORITY = 1
+DEFAULT_MODAL_CONNECTION_DURATION_MINUTES = 240
+DEFAULT_MODAL_CONNECTION_MODELS = (
+    DEFAULT_MODAL_CONNECTION_MODEL,
+    "Qwen/Qwen3.6-35B-A3B-FP8",
+    "Qwen/Qwen2.5-32B-Instruct",
+    "meta-llama/Llama-3.3-70B-Instruct",
+)
+DEFAULT_MODAL_CONNECTION_GPUS = (
+    "L40S",
+    "RTX4090",
+    "A100-40GB",
+    "A100-80GB",
+    "H100",
+    "L4",
+)
+MODAL_GPU_ALIASES: dict[str, str] = {
+    "RTX4090": "L40S",
+    "RTX_4090": "L40S",
+    "4090": "L40S",
 }
 MODAL_APP_STATUS_CACHE_TTL_SECONDS = max(
     5.0,
@@ -292,6 +325,50 @@ def _modal_worker_model_options() -> list[str]:
     return ordered
 
 
+def _modal_connection_model_options() -> list[str]:
+    raw = os.getenv("MODAL_CONNECTION_MODEL_OPTIONS", "")
+    configured = [
+        item.strip()
+        for item in raw.replace("\n", ",").split(",")
+        if item.strip()
+    ]
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for item in [*configured, *DEFAULT_MODAL_CONNECTION_MODELS]:
+        if item in seen:
+            continue
+        ordered.append(item)
+        seen.add(item)
+    return ordered
+
+
+def _modal_connection_gpu_options() -> list[str]:
+    raw = os.getenv("MODAL_CONNECTION_GPU_OPTIONS", "")
+    configured = [
+        item.strip()
+        for item in raw.replace("\n", ",").split(",")
+        if item.strip()
+    ]
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for item in [*configured, *DEFAULT_MODAL_CONNECTION_GPUS]:
+        if item in seen:
+            continue
+        ordered.append(item)
+        seen.add(item)
+    return ordered
+
+
+def _normalize_modal_gpu(gpu: str) -> str:
+    cleaned = gpu.strip()
+    if not cleaned:
+        return DEFAULT_MODAL_CONNECTION_GPU
+    compact = cleaned.replace(" ", "").replace("-", "").replace("_", "").upper()
+    if compact in {"RTX4090", "4090"}:
+        return "L40S"
+    return MODAL_GPU_ALIASES.get(cleaned, cleaned)
+
+
 def _pid_is_alive(pid: int | None) -> bool:
     if pid is None or pid <= 0:
         return False
@@ -314,6 +391,25 @@ def _modal_worker_state_path(layout: ArtifactLayout, launch_id: str) -> Path:
 
 def _load_modal_worker_state(layout: ArtifactLayout, launch_id: str) -> dict[str, Any]:
     path = _modal_worker_state_path(layout, launch_id)
+    if not path.is_file():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _modal_connection_log_path(layout: ArtifactLayout, launch_id: str) -> Path:
+    return layout.data_root / "dashboard" / "modal_connections" / f"{launch_id}.log"
+
+
+def _modal_connection_state_path(layout: ArtifactLayout, launch_id: str) -> Path:
+    return layout.data_root / "dashboard" / "modal_connections" / f"{launch_id}.state.json"
+
+
+def _load_modal_connection_state(layout: ArtifactLayout, launch_id: str) -> dict[str, Any]:
+    path = _modal_connection_state_path(layout, launch_id)
     if not path.is_file():
         return {}
     try:
@@ -757,6 +853,186 @@ def _remove_vast_endpoint_record(
     if not known_base_urls:
         return list(endpoint_records)
     return [item for item in endpoint_records if item.get("base_url") not in known_base_urls]
+
+
+def _modal_connection_payload(record: ModalConnectionRecord) -> dict[str, Any]:
+    status_map = {
+        ModalConnectionStatus.running: ("Running", "running"),
+        ModalConnectionStatus.starting: ("Starting", "failed"),
+        ModalConnectionStatus.stopping: ("Stopping", "failed"),
+        ModalConnectionStatus.stopped: ("Stopped", "failed"),
+        ModalConnectionStatus.expired: ("Expired", "failed"),
+        ModalConnectionStatus.failed: ("Failed", "failed"),
+    }
+    status_label, status_class = status_map.get(record.status, ("Unknown", "failed"))
+    return {
+        "launch_id": record.launch_id,
+        "display_name": record.display_name,
+        "model": record.model,
+        "served_model_name": record.served_model_name,
+        "gpu": record.gpu,
+        "status": record.status.value,
+        "status_label": status_label,
+        "status_class": status_class,
+        "duration_minutes": record.duration_minutes,
+        "started_at": record.started_at.isoformat(),
+        "expires_at": record.expires_at.isoformat(),
+        "app_id": record.app_id,
+        "base_url": record.base_url,
+        "api_key_set": bool(record.api_key),
+        "last_error": record.last_error,
+        "log_path": record.log_path,
+    }
+
+
+def _is_modal_base_url(base_url: str | None) -> bool:
+    if base_url is None:
+        return False
+    return ".modal.run" in base_url
+
+
+def _remove_modal_router_connections(existing: list[LLMRouterConnectionConfig]) -> list[LLMRouterConnectionConfig]:
+    return [
+        item.model_copy(deep=True)
+        for item in existing
+        if not (
+            (item.source_kind == "manual" and str(item.connection_id).startswith("modal-managed-"))
+            or _is_modal_base_url(str(item.base_url))
+        )
+    ]
+
+
+def _upsert_modal_router_connections(
+    *,
+    existing: list[LLMRouterConnectionConfig],
+    modal_connections: list[ModalConnectionRecord],
+) -> list[LLMRouterConnectionConfig]:
+    next_connections = _remove_modal_router_connections(existing)
+    for record in modal_connections:
+        base_url = _coerce_optional(record.base_url)
+        if base_url is None or record.status != ModalConnectionStatus.running:
+            continue
+        next_connections.append(
+            LLMRouterConnectionConfig(
+                connection_id=f"modal-managed-{record.launch_id[:12]}",
+                base_url=base_url,
+                model=record.served_model_name,
+                api_key=record.api_key,
+                starred=False,
+                priority=DEFAULT_MODAL_CONNECTION_PRIORITY,
+                source_kind="manual",
+                max_concurrent_requests=DEFAULT_MODAL_CONNECTION_MAX_CONCURRENT,
+                supports_image_inputs=True,
+            )
+        )
+    return next_connections
+
+
+def _remove_modal_endpoint_records(
+    endpoint_records: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    return [
+        item
+        for item in endpoint_records
+        if not (
+            str(item.get("source") or "").startswith("modal-managed")
+            or _is_modal_base_url(_coerce_optional(item.get("base_url")))
+        )
+    ]
+
+
+def _upsert_modal_endpoint_records(
+    *,
+    endpoint_records: list[dict[str, Any]],
+    modal_connections: list[ModalConnectionRecord],
+) -> list[dict[str, Any]]:
+    next_records = _remove_modal_endpoint_records(endpoint_records)
+    for record in modal_connections:
+        base_url = _coerce_optional(record.base_url)
+        if base_url is None or record.status != ModalConnectionStatus.running:
+            continue
+        next_records = [item for item in next_records if item.get("base_url") != base_url]
+        next_records.append(
+            {
+                "base_url": base_url,
+                "api_key": record.api_key,
+                "starred": False,
+                "priority": DEFAULT_MODAL_CONNECTION_PRIORITY,
+                "active": True,
+                "manually_disabled": False,
+                "last_error": _coerce_optional(record.last_error),
+                "source": f"modal-managed:{record.launch_id}",
+            }
+        )
+    return next_records
+
+
+def _reconcile_modal_connections(layout: ArtifactLayout) -> list[ModalConnectionRecord]:
+    now = datetime.now(timezone.utc)
+    records = load_modal_connections(layout)
+    next_records: list[ModalConnectionRecord] = []
+    dirty = False
+    for record in records:
+        state_payload = _load_modal_connection_state(layout, record.launch_id)
+        next_status = record.status
+        next_app_id = record.app_id
+        next_base_url = record.base_url
+        next_error = record.last_error
+        if isinstance(state_payload, dict) and state_payload:
+            state_value = _coerce_optional(state_payload.get("state"))
+            if state_value == "running":
+                next_status = ModalConnectionStatus.running
+            elif state_value == "starting":
+                next_status = ModalConnectionStatus.starting
+            elif state_value == "stopped":
+                next_status = ModalConnectionStatus.stopped
+            elif state_value == "failed":
+                next_status = ModalConnectionStatus.failed
+            if _coerce_optional(state_payload.get("app_id")) is not None:
+                next_app_id = _coerce_optional(state_payload.get("app_id"))
+            if _coerce_optional(state_payload.get("web_url")) is not None:
+                web_url = _coerce_optional(state_payload.get("web_url"))
+                next_base_url = f"{web_url.rstrip('/')}/v1" if web_url is not None else None
+            if _coerce_optional(state_payload.get("last_error")) is not None:
+                next_error = _coerce_optional(state_payload.get("last_error"))
+        if next_status in {ModalConnectionStatus.starting, ModalConnectionStatus.running}:
+            if not _pid_is_alive(record.pid):
+                if now >= record.expires_at:
+                    next_status = ModalConnectionStatus.expired
+                elif next_status == ModalConnectionStatus.starting:
+                    next_status = ModalConnectionStatus.failed
+                    if next_error is None:
+                        next_error = "Modal launcher process exited before endpoint became ready."
+                else:
+                    next_status = ModalConnectionStatus.stopped
+        if now >= record.expires_at and next_status in {ModalConnectionStatus.starting, ModalConnectionStatus.running}:
+            next_status = ModalConnectionStatus.expired
+        if (
+            next_status != record.status
+            or next_app_id != record.app_id
+            or next_base_url != record.base_url
+            or next_error != record.last_error
+        ):
+            dirty = True
+            record = record.model_copy(
+                update={
+                    "status": next_status,
+                    "app_id": next_app_id,
+                    "base_url": next_base_url,
+                    "last_error": next_error,
+                }
+            )
+        next_records.append(record)
+    pruned_records = [
+        item
+        for item in next_records
+        if item.status in {ModalConnectionStatus.starting, ModalConnectionStatus.running}
+    ]
+    if len(pruned_records) != len(next_records):
+        dirty = True
+    if dirty:
+        save_modal_connections(layout, pruned_records)
+    return sorted(pruned_records, key=lambda item: item.started_at, reverse=True)
 
 
 def _reconcile_vast_instance_state(*, layout: ArtifactLayout) -> VastInstanceRecord | None:
@@ -1610,6 +1886,56 @@ def _router_overview_metrics(snapshot: LLMRouterSnapshot) -> dict[str, Any]:
     }
 
 
+def _parse_router_request_timestamp(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _request_log_total_throughput(
+    entries: list[dict[str, Any]] | None,
+    *,
+    window_end: datetime | None = None,
+    window: timedelta = ROUTER_THROUGHPUT_WINDOW,
+) -> tuple[float, float, int]:
+    if not isinstance(entries, list) or not entries:
+        return 0.0, 0.0, 0
+    resolved_end = window_end.astimezone(timezone.utc) if window_end is not None else datetime.now(timezone.utc)
+    cutoff = resolved_end - window
+    total_completion_tokens = 0.0
+    total_duration_seconds = 0.0
+    sample_count = 0
+    for item in entries:
+        if not isinstance(item, dict):
+            continue
+        timestamp = _parse_router_request_timestamp(str(item.get("timestamp") or "").strip())
+        if timestamp is None or timestamp < cutoff or timestamp > resolved_end:
+            continue
+        completion_tokens = item.get("completion_tokens")
+        duration_seconds = item.get("duration_seconds")
+        if not isinstance(completion_tokens, (int, float)):
+            continue
+        if not isinstance(duration_seconds, (int, float)):
+            continue
+        duration = float(duration_seconds)
+        if duration <= 0.0:
+            continue
+        total_completion_tokens += float(completion_tokens)
+        total_duration_seconds += duration
+        sample_count += 1
+    if total_duration_seconds <= 0.0:
+        return 0.0, 0.0, sample_count
+    throughput = total_completion_tokens / total_duration_seconds
+    average_request_seconds = total_duration_seconds / sample_count if sample_count > 0 else 0.0
+    return throughput, average_request_seconds, sample_count
+
+
 def _serialize_router_telemetry(telemetry: Any) -> dict[str, Any]:
     if hasattr(telemetry, "model_dump"):
         payload = telemetry.model_dump(mode="json")
@@ -1791,7 +2117,9 @@ def create_router_app(*, layout: ArtifactLayout | None = None) -> FastAPI:
     endpoint_records = load_llm_router_endpoint_records(resolved_layout)
     manual_router_connections = _serialize_manual_router_connections(router_snapshot)
     manual_router_connections[:] = _remove_vast_router_connection(manual_router_connections)
+    manual_router_connections[:] = _remove_modal_router_connections(manual_router_connections)
     endpoint_records[:] = _remove_vast_endpoint_record(endpoint_records, base_url=None)
+    endpoint_records[:] = _remove_modal_endpoint_records(endpoint_records)
     save_llm_router_endpoint_records(resolved_layout, endpoint_records)
 
     async def _handle_pull_worker_request(
@@ -1861,6 +2189,26 @@ def create_router_app(*, layout: ArtifactLayout | None = None) -> FastAPI:
             await dashboard_llm_router.refresh_connection_health()
         await _persist_router_snapshot(layout=resolved_layout, router=dashboard_llm_router)
 
+    async def _sync_modal_managed_connections() -> list[ModalConnectionRecord]:
+        modal_connections = _reconcile_modal_connections(resolved_layout)
+        existing_manual = _serialize_manual_router_connections(dashboard_llm_router.snapshot())
+        next_manual = _upsert_modal_router_connections(
+            existing=existing_manual,
+            modal_connections=modal_connections,
+        )
+        if next_manual != existing_manual:
+            manual_router_connections[:] = next_manual
+            await _sync_router_sources(refresh_health=False)
+        endpoint_records_local = load_llm_router_endpoint_records(resolved_layout)
+        next_endpoint_records = _upsert_modal_endpoint_records(
+            endpoint_records=endpoint_records_local,
+            modal_connections=modal_connections,
+        )
+        if next_endpoint_records != endpoint_records_local:
+            save_llm_router_endpoint_records(resolved_layout, next_endpoint_records)
+            app.state.router_panel_cache = None
+        return modal_connections
+
     def _update_router_connection_outage_state() -> None:
         snapshot = dashboard_llm_router.snapshot()
         if any(item.active for item in snapshot.connections):
@@ -1889,6 +2237,22 @@ def create_router_app(*, layout: ArtifactLayout | None = None) -> FastAPI:
             error=error,
             error_count=_router_error_count(resolved_layout),
         )
+        modal_connections = _reconcile_modal_connections(resolved_layout)
+        payload["modal_connections"] = [
+            _modal_connection_payload(item)
+            for item in modal_connections
+        ]
+        request_payload = router_request_store.payload()
+        throughput_tps, average_request_seconds, sample_count = _request_log_total_throughput(
+            request_payload.get("requests") if isinstance(request_payload, dict) else None,
+        )
+        payload["total_output_tokens_per_second"] = round(throughput_tps, 2)
+        payload["average_output_tokens_per_second"] = round(throughput_tps, 2)
+        payload["average_request_seconds"] = round(average_request_seconds, 2)
+        payload["request_log_sample_count"] = sample_count
+        payload["request_log_window_minutes"] = int(ROUTER_THROUGHPUT_WINDOW.total_seconds() // 60)
+        payload["modal_model_options"] = _modal_connection_model_options()
+        payload["modal_gpu_options"] = _modal_connection_gpu_options()
         if error is None:
             app.state.router_panel_cache = {
                 "captured_at": now,
@@ -2017,13 +2381,18 @@ def create_router_app(*, layout: ArtifactLayout | None = None) -> FastAPI:
                 if disconnected_modal_workers:
                     await _persist_worker_registry()
                     await _sync_router_sources(refresh_health=False)
+                await _sync_modal_managed_connections()
                 await dashboard_llm_router.refresh_connection_health()
                 await _persist_router_snapshot(layout=resolved_layout, router=dashboard_llm_router)
                 router_metrics = _router_overview_metrics(dashboard_llm_router.snapshot())
+                request_payload = router_request_store.payload()
+                throughput_tps, _average_request_seconds, _sample_count = _request_log_total_throughput(
+                    request_payload.get("requests") if isinstance(request_payload, dict) else None,
+                )
                 await asyncio.to_thread(
                     router_metrics_history.record,
                     in_flight_requests=router_metrics["total_in_flight_requests"],
-                    throughput=router_metrics["total_output_tokens_per_second"],
+                    throughput=throughput_tps,
                 )
                 app.state.router_panel_cache = None
                 _update_router_connection_outage_state()
@@ -2044,6 +2413,7 @@ def create_router_app(*, layout: ArtifactLayout | None = None) -> FastAPI:
     @app.on_event("startup")
     async def router_startup() -> None:
         await _sync_router_sources(refresh_health=False)
+        await _sync_modal_managed_connections()
         await dashboard_llm_router.refresh_connection_health()
         await _persist_router_snapshot(layout=resolved_layout, router=dashboard_llm_router)
         await _persist_worker_registry()
@@ -2052,10 +2422,14 @@ def create_router_app(*, layout: ArtifactLayout | None = None) -> FastAPI:
             workers=worker_registry.list_workers(),
         )
         router_metrics = _router_overview_metrics(dashboard_llm_router.snapshot())
+        request_payload = router_request_store.payload()
+        throughput_tps, _average_request_seconds, _sample_count = _request_log_total_throughput(
+            request_payload.get("requests") if isinstance(request_payload, dict) else None,
+        )
         await asyncio.to_thread(
             router_metrics_history.record,
             in_flight_requests=router_metrics["total_in_flight_requests"],
-            throughput=router_metrics["total_output_tokens_per_second"],
+            throughput=throughput_tps,
         )
         _update_router_connection_outage_state()
         await asyncio.to_thread(
@@ -2423,6 +2797,156 @@ def create_router_app(*, layout: ArtifactLayout | None = None) -> FastAPI:
             else:
                 await _persist_worker_registry()
                 await _sync_router_sources(refresh_health=False)
+        app.state.router_panel_cache = None
+        return RedirectResponse(next_url, status_code=303)
+
+    @app.post("/router/modal/start")
+    async def start_modal_connection(request: Request) -> RedirectResponse:
+        body_text = (await request.body()).decode("utf-8")
+        parsed_form = parse_qs(body_text, keep_blank_values=True)
+        next_url = parsed_form.get("next", ["/"])[0] or "/"
+        model = (parsed_form.get("modal_connection_model", [""])[0] or "").strip() or DEFAULT_MODAL_CONNECTION_MODEL
+        requested_gpu = (parsed_form.get("modal_connection_gpu", [""])[0] or "").strip() or DEFAULT_MODAL_CONNECTION_GPU
+        gpu = _normalize_modal_gpu(requested_gpu)
+        served_model_name = (
+            (parsed_form.get("modal_connection_served_model_name", [""])[0] or "").strip()
+            or DEFAULT_MODAL_CONNECTION_SERVED_MODEL_NAME
+        )
+        api_key = (parsed_form.get("modal_connection_api_key", [""])[0] or "").strip() or (
+            os.getenv("PATTERN_LLM_API_KEY", "").strip() or os.getenv("OPENAI_API_KEY", "").strip() or None
+        )
+        try:
+            duration_minutes = int(
+                (parsed_form.get("modal_connection_duration_minutes", [str(DEFAULT_MODAL_CONNECTION_DURATION_MINUTES)])[0]
+                 or str(DEFAULT_MODAL_CONNECTION_DURATION_MINUTES)).strip()
+            )
+            duration_minutes = max(5, min(10080, duration_minutes))
+        except ValueError:
+            return _redirect_with_error(next_url, "Modal duration must be an integer number of minutes.")
+        try:
+            max_model_len = int(
+                (parsed_form.get("modal_connection_max_model_len", [str(DEFAULT_MODAL_CONNECTION_MAX_MODEL_LEN)])[0]
+                 or str(DEFAULT_MODAL_CONNECTION_MAX_MODEL_LEN)).strip()
+            )
+            max_model_len = max(1024, min(262144, max_model_len))
+        except ValueError:
+            return _redirect_with_error(next_url, "Modal max model len must be an integer.")
+        if importlib.util.find_spec("modal") is None:
+            return _redirect_with_error(next_url, "The `modal` package is not installed in llm_router.")
+        launch_id = uuid4().hex
+        display_name = f"modal-endpoint-{launch_id[:6]}"
+        state_path = _modal_connection_state_path(resolved_layout, launch_id)
+        log_path = _modal_connection_log_path(resolved_layout, launch_id)
+        command = [
+            sys.executable,
+            str(Path(__file__).resolve().parent / "modal_openai_server.py"),
+            "--model",
+            model,
+            "--served-model-name",
+            served_model_name,
+            "--gpu",
+            gpu,
+            "--max-model-len",
+            str(max_model_len),
+            "--duration-minutes",
+            str(duration_minutes),
+            "--app-name",
+            f"llm-router-modal-{launch_id[:8]}",
+            "--launch-id",
+            launch_id,
+            "--state-path",
+            str(state_path),
+        ]
+        if api_key:
+            command.extend(["--api-key", api_key])
+        env = os.environ.copy()
+        env.update(load_dotenv_file(_router_env_file_path(resolved_layout)))
+        try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with log_path.open("a", encoding="utf-8") as handle:
+                process = subprocess.Popen(
+                    command,
+                    cwd=str(resolved_layout.project_root),
+                    env=env,
+                    stdout=handle,
+                    stderr=subprocess.STDOUT,
+                    stdin=subprocess.DEVNULL,
+                    start_new_session=True,
+                    text=True,
+                )
+        except OSError as exc:
+            return _redirect_with_error(next_url, f"Failed to launch Modal endpoint: {exc}")
+        records = _reconcile_modal_connections(resolved_layout)
+        records = [item for item in records if item.launch_id != launch_id]
+        records.insert(
+            0,
+            ModalConnectionRecord(
+                launch_id=launch_id,
+                display_name=display_name,
+                model=model,
+                served_model_name=served_model_name,
+                gpu=gpu,
+                duration_minutes=duration_minutes,
+                started_at=datetime.now(timezone.utc),
+                expires_at=datetime.now(timezone.utc) + timedelta(minutes=duration_minutes),
+                pid=process.pid,
+                app_id=None,
+                base_url=None,
+                api_key=api_key,
+                log_path=str(log_path),
+                state_path=str(state_path),
+                status=ModalConnectionStatus.starting,
+                metadata={
+                    "launcher": "modal_openai_server",
+                    "max_model_len": max_model_len,
+                    "requested_gpu": requested_gpu,
+                },
+            ),
+        )
+        save_modal_connections(resolved_layout, records)
+        await _sync_modal_managed_connections()
+        app.state.router_panel_cache = None
+        return RedirectResponse(next_url, status_code=303)
+
+    @app.post("/router/modal/{launch_id}/stop")
+    async def stop_modal_connection(request: Request, launch_id: str) -> RedirectResponse:
+        body_text = (await request.body()).decode("utf-8")
+        parsed_form = parse_qs(body_text, keep_blank_values=True)
+        next_url = parsed_form.get("next", ["/"])[0] or "/"
+        records = _reconcile_modal_connections(resolved_layout)
+        if not records:
+            return _redirect_with_error(next_url, "No Modal connections found.")
+        updated = False
+        next_records: list[ModalConnectionRecord] = []
+        for record in records:
+            if record.launch_id != launch_id:
+                next_records.append(record)
+                continue
+            updated = True
+            if _pid_is_alive(record.pid):
+                try:
+                    assert record.pid is not None
+                    os.killpg(record.pid, signal.SIGTERM)
+                except (AssertionError, ProcessLookupError):
+                    pass
+            stop_ok, stop_error = _stop_modal_launch_app(
+                layout=resolved_layout,
+                launch_id=record.launch_id,
+                modal_app_id=record.app_id,
+            )
+            next_records.append(
+                record.model_copy(
+                    update={
+                        "status": ModalConnectionStatus.stopped if stop_ok else ModalConnectionStatus.failed,
+                        "pid": None,
+                        "last_error": stop_error,
+                    }
+                )
+            )
+        if not updated:
+            return _redirect_with_error(next_url, f"Modal connection not found: {launch_id}")
+        save_modal_connections(resolved_layout, next_records)
+        await _sync_modal_managed_connections()
         app.state.router_panel_cache = None
         return RedirectResponse(next_url, status_code=303)
 
