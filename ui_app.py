@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import time
 from datetime import datetime, timedelta, timezone
+import hashlib
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -18,6 +21,8 @@ from fastapi.templating import Jinja2Templates
 BACKEND_BASE_URL = os.getenv("LLM_ROUTER_BACKEND_URL", "http://127.0.0.1:8788").rstrip("/")
 ROUTER_DISPLAY_TIMEZONE = ZoneInfo("Europe/London")
 REQUEST_LOG_THROUGHPUT_WINDOW = timedelta(minutes=10)
+UI_REQUEST_LOG_LIMIT = 2000
+UI_BACKEND_CACHE_SECONDS = 2.0
 HOP_BY_HOP_HEADERS = {
     "connection",
     "content-length",
@@ -110,6 +115,159 @@ def _request_log_window_metrics(
         "request_log_sample_count": len(metrics_samples),
         "request_log_window_minutes": int(REQUEST_LOG_THROUGHPUT_WINDOW.total_seconds() // 60),
     }
+
+
+def _router_connection_id(
+    *,
+    explicit_value: str | None,
+    base_url: str,
+    model: str,
+    ordinal: int,
+) -> str:
+    if explicit_value and explicit_value.strip():
+        return explicit_value.strip()
+    host_slug = re.sub(r"[^a-z0-9]+", "-", base_url.lower()).strip("-")
+    model_slug = re.sub(r"[^a-z0-9]+", "-", model.lower()).strip("-")
+    candidate = "-".join(part for part in (host_slug, model_slug) if part)
+    if not candidate:
+        candidate = f"connection-{ordinal}"
+    if len(candidate) <= 80:
+        return candidate
+    digest = hashlib.sha1(candidate.encode("utf-8")).hexdigest()[:8]
+    prefix = candidate[: max(1, 80 - len(digest) - 1)].rstrip("-")
+    return f"{prefix}-{digest}"
+
+
+def _request_log_throughput_by_connection(
+    requests: dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> dict[str, float]:
+    entries = requests.get("requests")
+    if not isinstance(entries, list):
+        return {}
+    window_end = now.astimezone(timezone.utc) if now is not None else _utc_now()
+    cutoff = window_end - REQUEST_LOG_THROUGHPUT_WINDOW
+    totals_by_connection: dict[str, float] = {}
+    for item in entries:
+        if not isinstance(item, dict):
+            continue
+        timestamp = _parse_request_timestamp(str(item.get("timestamp") or "").strip())
+        if timestamp is None or timestamp < cutoff or timestamp > window_end:
+            continue
+        connection = item.get("connection")
+        connection_id = ""
+        if isinstance(connection, dict):
+            connection_id = str(connection.get("connection_id") or "").strip()
+            if not connection_id:
+                nested_worker_id = str(connection.get("worker_id") or "").strip()
+                nested_source_kind = str(connection.get("source_kind") or "").strip().lower()
+                if nested_source_kind == "worker" and nested_worker_id:
+                    connection_id = f"worker:{nested_worker_id}"
+        if not connection_id:
+            worker_id = str(item.get("worker_id") or "").strip()
+            source_kind = str(item.get("source_kind") or "").strip().lower()
+            selected_model = str(item.get("selected_model") or item.get("model") or "").strip()
+            base_url = str(item.get("base_url") or "").strip()
+            if source_kind == "worker" and worker_id:
+                connection_id = f"worker:{worker_id}"
+            elif base_url and selected_model:
+                connection_id = _router_connection_id(
+                    explicit_value=None,
+                    base_url=base_url,
+                    model=selected_model,
+                    ordinal=1,
+                )
+        if not connection_id:
+            continue
+        completion_tokens = item.get("completion_tokens")
+        duration_seconds = item.get("duration_seconds")
+        if not isinstance(completion_tokens, (int, float)):
+            continue
+        if not isinstance(duration_seconds, (int, float)) or float(duration_seconds) <= 0.0:
+            continue
+        totals_by_connection[connection_id] = totals_by_connection.get(connection_id, 0.0) + float(
+            completion_tokens
+        )
+    window_seconds = max(REQUEST_LOG_THROUGHPUT_WINDOW.total_seconds(), 1.0)
+    return {
+        connection_id: round(total_completion_tokens / window_seconds, 2)
+        for connection_id, total_completion_tokens in totals_by_connection.items()
+    }
+
+
+def _connection_with_request_log_throughput(
+    connection: dict[str, Any],
+    *,
+    throughput_by_connection: dict[str, float],
+) -> dict[str, Any]:
+    next_connection = dict(connection)
+    telemetry = next_connection.get("telemetry")
+    if isinstance(telemetry, dict):
+        next_telemetry = dict(telemetry)
+    else:
+        next_telemetry = {}
+    connection_id = str(next_connection.get("connection_id") or "").strip()
+    next_telemetry["average_output_tokens_per_second"] = throughput_by_connection.get(connection_id, 0.0)
+    next_connection["telemetry"] = next_telemetry
+    return next_connection
+
+
+def _panel_with_request_log_connection_metrics(
+    panel: dict[str, Any],
+    *,
+    requests: dict[str, Any],
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    throughput_by_connection = _request_log_throughput_by_connection(requests, now=now)
+    next_panel = dict(panel)
+
+    connections = panel.get("connections")
+    if isinstance(connections, list):
+        next_panel["connections"] = [
+            _connection_with_request_log_throughput(item, throughput_by_connection=throughput_by_connection)
+            if isinstance(item, dict)
+            else item
+            for item in connections
+        ]
+
+    worker_connections = panel.get("worker_connections")
+    if isinstance(worker_connections, list):
+        next_panel["worker_connections"] = [
+            _connection_with_request_log_throughput(item, throughput_by_connection=throughput_by_connection)
+            if isinstance(item, dict)
+            else item
+            for item in worker_connections
+        ]
+
+    endpoints = panel.get("endpoints")
+    if isinstance(endpoints, list):
+        next_endpoints: list[dict[str, Any]] = []
+        for endpoint in endpoints:
+            if not isinstance(endpoint, dict):
+                continue
+            next_endpoint = dict(endpoint)
+            models = endpoint.get("models")
+            if isinstance(models, list):
+                next_models: list[dict[str, Any]] = []
+                endpoint_total_tps = 0.0
+                for model in models:
+                    if not isinstance(model, dict):
+                        continue
+                    next_model = _connection_with_request_log_throughput(
+                        model,
+                        throughput_by_connection=throughput_by_connection,
+                    )
+                    model_tps = next_model.get("telemetry", {}).get("average_output_tokens_per_second")
+                    if isinstance(model_tps, (int, float)):
+                        endpoint_total_tps += float(model_tps)
+                    next_models.append(next_model)
+                next_endpoint["models"] = next_models
+                next_endpoint["average_output_tokens_per_second"] = round(endpoint_total_tps, 2)
+            next_endpoints.append(next_endpoint)
+        next_panel["endpoints"] = next_endpoints
+
+    return next_panel
 
 
 def _request_log_metric_samples(
@@ -394,6 +552,34 @@ async def _fetch_backend_json_optional(path: str, *, default: dict[str, Any]) ->
         raise
 
 
+def _ui_request_log_default() -> dict[str, Any]:
+    return {"requests": [], "total_retained": 0, "max_entries": 0}
+
+
+async def _fetch_router_payloads(app: FastAPI) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    cache_entry = getattr(app.state, "router_ui_backend_cache", None)
+    now = time.monotonic()
+    if isinstance(cache_entry, dict) and (now - float(cache_entry.get("captured_at") or 0.0)) < UI_BACKEND_CACHE_SECONDS:
+        return (
+            dict(cache_entry["panel"]),
+            dict(cache_entry["history"]),
+            dict(cache_entry["requests"]),
+        )
+    panel = await _fetch_backend_json("/api/router/panel")
+    history = await _fetch_backend_json("/api/router/history")
+    requests = await _fetch_backend_json_optional(
+        f"/api/router/requests?limit={UI_REQUEST_LOG_LIMIT}",
+        default=_ui_request_log_default(),
+    )
+    app.state.router_ui_backend_cache = {
+        "captured_at": now,
+        "panel": panel,
+        "history": history,
+        "requests": requests,
+    }
+    return dict(panel), dict(history), dict(requests)
+
+
 def _router_context(
     *,
     panel: dict[str, Any],
@@ -401,6 +587,7 @@ def _router_context(
     requests: dict[str, Any],
 ) -> dict[str, Any]:
     normalized_requests = _normalize_request_entries(panel=panel, requests=requests)
+    panel = _panel_with_request_log_connection_metrics(panel, requests=normalized_requests)
     history_with_request_log_throughput = _history_with_request_log_throughput(
         history=history,
         requests=normalized_requests,
@@ -429,17 +616,17 @@ def _router_context(
 def create_router_ui_app() -> FastAPI:
     root = Path(__file__).resolve().parent
     templates = Jinja2Templates(directory=str(root / "templates"))
-    templates.env.cache = None
     templates.env.globals["_format_compact_metric"] = _format_compact_metric
 
     app = FastAPI(title="LLM Router UI")
     app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=6)
     app.mount("/static", StaticFiles(directory=str(root / "static")), name="static")
+    app.state.router_ui_backend_cache = None
 
     @app.get("/healthz")
     async def healthz() -> JSONResponse:
         try:
-            await _fetch_backend_json("/api/router/panel")
+            await _fetch_router_payloads(app)
         except Exception as exc:  # noqa: BLE001
             return JSONResponse({"ok": False, "detail": str(exc)}, status_code=503)
         return JSONResponse({"ok": True})
@@ -448,12 +635,7 @@ def create_router_ui_app() -> FastAPI:
     async def router_index(request: Request) -> HTMLResponse:
         error = request.query_params.get("router_error")
         try:
-            panel = await _fetch_backend_json("/api/router/panel")
-            history = await _fetch_backend_json("/api/router/history")
-            requests = await _fetch_backend_json_optional(
-                "/api/router/requests",
-                default={"requests": [], "total_retained": 0, "max_entries": 0},
-            )
+            panel, history, requests = await _fetch_router_payloads(app)
         except Exception as exc:  # noqa: BLE001
             fallback_panel = {
                 "base_url": BACKEND_BASE_URL,
@@ -484,7 +666,7 @@ def create_router_ui_app() -> FastAPI:
                 _router_context(
                     panel=fallback_panel,
                     history={"points": [], "window_seconds": 3600},
-                    requests={"requests": [], "total_retained": 0, "max_entries": 0},
+                    requests=_ui_request_log_default(),
                 ),
                 status_code=503,
             )
@@ -500,12 +682,7 @@ def create_router_ui_app() -> FastAPI:
     @app.get("/router/live")
     async def router_live(request: Request) -> JSONResponse:
         try:
-            panel = await _fetch_backend_json("/api/router/panel")
-            history = await _fetch_backend_json("/api/router/history")
-            requests = await _fetch_backend_json_optional(
-                "/api/router/requests",
-                default={"requests": [], "total_retained": 0, "max_entries": 0},
-            )
+            panel, history, requests = await _fetch_router_payloads(app)
         except Exception:
             return JSONResponse({"error": "Backend unavailable"}, status_code=503)
         panel["base_url"] = _external_router_base_url(request)
