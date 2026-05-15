@@ -4,7 +4,7 @@ set -euo pipefail
 export PYTHONPATH="/opt/llm-router-worker:${PYTHONPATH:-}"
 export LLAMA_CPP_ROOT="${LLAMA_CPP_ROOT:-/app}"
 export LD_LIBRARY_PATH="${LLAMA_CPP_ROOT}:/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}"
-PYTHON_BIN="${LLM_ROUTER_PYTHON_BIN:-/opt/llm-router-worker-venv/bin/python}"
+PYTHON_BIN="${LLM_ROUTER_PYTHON_BIN:-$(command -v python3 || command -v python)}"
 if [[ ! -x "${PYTHON_BIN}" ]]; then
   PYTHON_BIN="$(command -v python3 || command -v python)"
 fi

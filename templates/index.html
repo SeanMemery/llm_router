@@ -160,6 +160,8 @@
       const fieldSelector = 'input:not([type="hidden"]), textarea, select';
       const detailsSelector = 'details.router-endpoint, details[data-persist-key]';
       const endpointSupportToggleSelector = '[data-endpoint-support-toggle]';
+      let activeModal = null;
+      let activeModalTrigger = null;
 
       const fieldKey = (field, index) => {
         const persistKey = field.dataset.persistKey;
@@ -177,6 +179,7 @@
         const payload = {
           fields: {},
           details: {},
+          modalId: activeModal instanceof HTMLElement && !activeModal.hidden ? activeModal.id : null,
         };
         Array.from(document.querySelectorAll(detailsSelector)).forEach((item, index) => {
           const key = item.dataset.persistKey || `details-${index}`;
@@ -216,6 +219,20 @@
                 item.open = Boolean(payload.details[key]);
               }
             });
+          }
+          const modalId = typeof payload?.modalId === "string" ? payload.modalId : "";
+          if (modalId) {
+            const modal = document.getElementById(modalId);
+            if (modal instanceof HTMLElement) {
+              modal.hidden = false;
+              document.body.classList.add("router-modal-open");
+              activeModal = modal;
+              activeModalTrigger = document.querySelector(`[data-router-modal-open="${modalId}"]`);
+            }
+          } else if (!document.querySelector(".router-page-modal:not([hidden])")) {
+            document.body.classList.remove("router-modal-open");
+            activeModal = null;
+            activeModalTrigger = null;
           }
         } catch {
           window.sessionStorage.removeItem(storageKey);
@@ -476,14 +493,13 @@
           refreshIntervalInput.select();
         }
       });
-      let activeModal = null;
-      let activeModalTrigger = null;
       const openModal = (modal, trigger = null, focusTarget = null) => {
         if (!(modal instanceof HTMLElement)) return;
         activeModal = modal;
         activeModalTrigger = trigger instanceof HTMLElement ? trigger : null;
         modal.hidden = false;
         document.body.classList.add("router-modal-open");
+        saveState();
         window.requestAnimationFrame(() => {
           if (focusTarget instanceof HTMLInputElement || focusTarget instanceof HTMLTextAreaElement) {
             focusTarget.focus();
@@ -508,6 +524,7 @@
           activeModal = null;
           activeModalTrigger = null;
         }
+        saveState();
       };
       addModelOpenButton?.addEventListener("click", () => openModal(addModelModal, addModelOpenButton, addModelFirstField));
       document.addEventListener("click", (event) => {

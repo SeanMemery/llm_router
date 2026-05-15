@@ -1,8 +1,17 @@
 from __future__ import annotations
 
-from app import _router_overview_metrics
+import time
+
+from datetime import datetime, timezone
+
+from app import (
+    _request_log_throughput_by_connection,
+    _router_overview_metrics,
+    _serialize_router_connection_snapshot,
+)
 from dashboard.llm_router import (
     LLMRouterConnectionSnapshot,
+    PER_MODEL_THROUGHPUT_WINDOW_SECONDS,
     LLMRouterSnapshot,
     LLMRouterTelemetry,
 )
@@ -17,6 +26,107 @@ def _telemetry(*, completion_tokens: int, request_seconds: float, concurrent_req
         concurrent_requests_seen=concurrent_requests_seen,
     )
     return telemetry
+
+
+def test_per_model_tokens_per_second_uses_total_output_over_last_10_minutes(monkeypatch) -> None:
+    telemetry = LLMRouterTelemetry()
+    now = 1_800.0
+    monkeypatch.setattr(time, "time", lambda: now)
+    telemetry.record_request(
+        prompt_tokens=10,
+        completion_tokens=240,
+        request_duration_seconds=4.0,
+        concurrent_requests_seen=1,
+        timestamp_epoch_seconds=now - 120.0,
+    )
+    telemetry.record_request(
+        prompt_tokens=10,
+        completion_tokens=60,
+        request_duration_seconds=2.0,
+        concurrent_requests_seen=1,
+        timestamp_epoch_seconds=now - 30.0,
+    )
+    telemetry.record_request(
+        prompt_tokens=10,
+        completion_tokens=9_999,
+        request_duration_seconds=1.0,
+        concurrent_requests_seen=1,
+        timestamp_epoch_seconds=now - (PER_MODEL_THROUGHPUT_WINDOW_SECONDS + 1.0),
+    )
+
+    assert telemetry.average_output_tokens_per_second == 0.5
+
+
+def test_serialized_connection_uses_request_log_throughput_override() -> None:
+    connection = LLMRouterConnectionSnapshot(
+        connection_id="conn-1",
+        base_url="http://worker.example",
+        model="demo-model",
+        max_concurrent_requests=4,
+        telemetry=_telemetry(
+            completion_tokens=400,
+            request_seconds=2.0,
+            concurrent_requests_seen=1,
+        ),
+    )
+    throughput_by_connection = _request_log_throughput_by_connection(
+        [
+            {
+                "timestamp": "2026-05-03T13:58:00Z",
+                "completion_tokens": 120,
+                "duration_seconds": 2.0,
+                "connection": {"connection_id": "conn-1"},
+            },
+            {
+                "timestamp": "2026-05-03T13:54:00Z",
+                "completion_tokens": 180,
+                "duration_seconds": 3.0,
+                "connection": {"connection_id": "conn-1"},
+            },
+            {
+                "timestamp": "2026-05-03T13:40:00Z",
+                "completion_tokens": 999,
+                "duration_seconds": 1.0,
+                "connection": {"connection_id": "conn-1"},
+            },
+        ],
+        window_end=datetime(2026, 5, 3, 14, 0, 0, tzinfo=timezone.utc),
+    )
+
+    serialized = _serialize_router_connection_snapshot(
+        connection,
+        throughput_by_connection_id=throughput_by_connection,
+    )
+
+    assert serialized["telemetry"]["average_output_tokens_per_second"] == 0.5
+
+
+def test_request_log_throughput_by_connection_supports_summary_entries() -> None:
+    throughput_by_connection = _request_log_throughput_by_connection(
+        [
+            {
+                "timestamp": "2026-05-03T13:58:00Z",
+                "completion_tokens": 120,
+                "duration_seconds": 2.0,
+                "base_url": "worker://worker-1",
+                "selected_model": "demo-model",
+                "source_kind": "worker",
+                "worker_id": "worker-1",
+            },
+            {
+                "timestamp": "2026-05-03T13:54:00Z",
+                "completion_tokens": 180,
+                "duration_seconds": 3.0,
+                "base_url": "http://example.local:8000",
+                "selected_model": "demo-model",
+                "source_kind": "manual",
+            },
+        ],
+        window_end=datetime(2026, 5, 3, 14, 0, 0, tzinfo=timezone.utc),
+    )
+
+    assert throughput_by_connection["worker:worker-1"] == 0.2
+    assert throughput_by_connection["http-example-local-8000-demo-model"] == 0.3
 
 
 def test_router_overview_metrics_only_count_active_connections_for_dynamic_metrics() -> None:

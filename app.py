@@ -88,7 +88,7 @@ ROUTER_METRICS_SAMPLE_INTERVAL_SECONDS = max(
 ROUTER_THROUGHPUT_WINDOW = timedelta(minutes=10)
 ROUTER_REQUEST_LOG_MAX_ENTRIES = max(
     100,
-    int(os.getenv("ROUTER_REQUEST_LOG_MAX_ENTRIES", "1000")),
+    int(os.getenv("ROUTER_REQUEST_LOG_MAX_ENTRIES", "1000000")),
 )
 DEFAULT_MODAL_WORKER_MODEL = "RedHatAI/Qwen3.6-35B-A3B-NVFP4"
 DEFAULT_MODAL_WORKER_MODELS = (
@@ -104,8 +104,9 @@ DEFAULT_VAST_INSTANCE_LABEL = "llm-router-vast-qwen36"
 DEFAULT_VAST_IMAGE = "vllm/vllm-openai:latest"
 DEFAULT_VAST_ENDPOINT_PORT = 8000
 DEFAULT_VAST_DISK_GB = 120
-DEFAULT_VAST_MAX_MODEL_LEN = 2048
+DEFAULT_VAST_MAX_MODEL_LEN = 16384
 DEFAULT_VAST_GPU_MEMORY_UTILIZATION = 0.72
+DEFAULT_VAST_KV_CACHE_DTYPE = "fp8"
 DEFAULT_VAST_MAX_CONCURRENT = 8
 DEFAULT_VAST_ENDPOINT_PRIORITY = 1
 DEFAULT_VAST_REASONING_PARSER = "qwen3"
@@ -126,7 +127,7 @@ DEFAULT_VAST_MANAGED_BASE_URLS = {
 DEFAULT_MODAL_CONNECTION_MODEL = "RedHatAI/Qwen3.6-35B-A3B-NVFP4"
 DEFAULT_MODAL_CONNECTION_GPU = "L40S"
 DEFAULT_MODAL_CONNECTION_SERVED_MODEL_NAME = "llm"
-DEFAULT_MODAL_CONNECTION_MAX_MODEL_LEN = 8192
+DEFAULT_MODAL_CONNECTION_MAX_MODEL_LEN = 16384
 DEFAULT_MODAL_CONNECTION_MAX_CONCURRENT = 8
 DEFAULT_MODAL_CONNECTION_PRIORITY = 1
 DEFAULT_MODAL_CONNECTION_DURATION_MINUTES = 240
@@ -275,6 +276,10 @@ class WorkerRequestPollRequest(BaseModel):
 
 class WorkerConcurrencySettingsRequest(BaseModel):
     max_concurrent_requests: int | None = Field(default=None, ge=1, le=32)
+
+
+class WorkerContextSettingsRequest(BaseModel):
+    max_context_tokens: int | None = Field(default=None, ge=1)
 
 
 class RouterPrioritySettingsRequest(BaseModel):
@@ -655,6 +660,7 @@ def _vast_onstart_command(*, model: str, served_model_name: str, api_key: str) -
         f"--served-model-name {served_model_name} "
         f"--max-model-len {DEFAULT_VAST_MAX_MODEL_LEN} "
         f"--gpu-memory-utilization {DEFAULT_VAST_GPU_MEMORY_UTILIZATION:.2f} "
+        f"--kv-cache-dtype {DEFAULT_VAST_KV_CACHE_DTYPE} "
         f"--reasoning-parser {DEFAULT_VAST_REASONING_PARSER} "
         f"--moe-backend {DEFAULT_VAST_MOE_BACKEND} "
         "--enforce-eager "
@@ -797,6 +803,7 @@ def _upsert_vast_router_connection(
             priority=DEFAULT_VAST_ENDPOINT_PRIORITY,
             source_kind="manual",
             max_concurrent_requests=DEFAULT_VAST_MAX_CONCURRENT,
+            max_context_tokens=DEFAULT_VAST_MAX_MODEL_LEN,
             supports_image_inputs=True,
         )
     )
@@ -922,6 +929,7 @@ def _upsert_modal_router_connections(
                 priority=DEFAULT_MODAL_CONNECTION_PRIORITY,
                 source_kind="manual",
                 max_concurrent_requests=DEFAULT_MODAL_CONNECTION_MAX_CONCURRENT,
+                max_context_tokens=DEFAULT_MODAL_CONNECTION_MAX_MODEL_LEN,
                 supports_image_inputs=True,
             )
         )
@@ -1164,6 +1172,7 @@ def _serialize_router_connections(
             starred=item.starred,
             priority=item.priority,
             max_concurrent_requests=item.max_concurrent_requests,
+            max_context_tokens=item.max_context_tokens,
             supports_image_inputs=item.supports_image_inputs,
         )
         for item in snapshot.connections
@@ -1821,6 +1830,7 @@ def _parse_single_router_connection(
         starred=False,
         priority=int(priority or "2"),
         max_concurrent_requests=int(max_concurrent or "1"),
+        max_context_tokens=None,
         supports_image_inputs=supports_image_inputs,
     )
 
@@ -1935,7 +1945,73 @@ def _request_log_total_throughput(
     return throughput, average_request_seconds, sample_count
 
 
-def _serialize_router_telemetry(telemetry: Any) -> dict[str, Any]:
+def _request_log_throughput_by_connection(
+    entries: list[dict[str, Any]] | None,
+    *,
+    window_end: datetime | None = None,
+    window: timedelta = ROUTER_THROUGHPUT_WINDOW,
+) -> dict[str, float]:
+    if not isinstance(entries, list) or not entries:
+        return {}
+    resolved_end = window_end.astimezone(timezone.utc) if window_end is not None else datetime.now(timezone.utc)
+    cutoff = resolved_end - window
+    totals_by_connection: dict[str, float] = {}
+    for item in entries:
+        if not isinstance(item, dict):
+            continue
+        timestamp = _parse_router_request_timestamp(str(item.get("timestamp") or "").strip())
+        if timestamp is None or timestamp < cutoff or timestamp > resolved_end:
+            continue
+        connection = item.get("connection")
+        connection_id = ""
+        if isinstance(connection, dict):
+            connection_id = str(connection.get("connection_id") or "").strip()
+            if not connection_id:
+                nested_worker_id = str(connection.get("worker_id") or "").strip()
+                nested_source_kind = str(connection.get("source_kind") or "").strip().lower()
+                if nested_source_kind == "worker" and nested_worker_id:
+                    connection_id = f"worker:{nested_worker_id}"
+        if not connection_id:
+            worker_id = str(item.get("worker_id") or "").strip()
+            source_kind = str(item.get("source_kind") or "").strip().lower()
+            selected_model = str(item.get("selected_model") or item.get("model") or "").strip()
+            base_url = str(item.get("base_url") or "").strip()
+            if source_kind == "worker" and worker_id:
+                connection_id = f"worker:{worker_id}"
+            elif base_url and selected_model:
+                connection_id = _router_connection_id(
+                    explicit_value=None,
+                    base_url=base_url,
+                    model=selected_model,
+                    ordinal=1,
+                )
+        if not connection_id:
+            continue
+        completion_tokens = item.get("completion_tokens")
+        duration_seconds = item.get("duration_seconds")
+        if not isinstance(duration_seconds, (int, float)):
+            timing = item.get("timing")
+            if isinstance(timing, dict):
+                duration_seconds = timing.get("router_request_seconds")
+        if not isinstance(completion_tokens, (int, float)):
+            continue
+        if not isinstance(duration_seconds, (int, float)):
+            continue
+        if float(duration_seconds) <= 0.0:
+            continue
+        totals_by_connection[connection_id] = totals_by_connection.get(connection_id, 0.0) + float(completion_tokens)
+    window_seconds = max(float(window.total_seconds()), 1.0)
+    return {
+        connection_id: total_completion_tokens / window_seconds
+        for connection_id, total_completion_tokens in totals_by_connection.items()
+    }
+
+
+def _serialize_router_telemetry(
+    telemetry: Any,
+    *,
+    average_output_tokens_per_second_override: float | None = None,
+) -> dict[str, Any]:
     if hasattr(telemetry, "model_dump"):
         payload = telemetry.model_dump(mode="json")
     elif isinstance(telemetry, dict):
@@ -1943,7 +2019,11 @@ def _serialize_router_telemetry(telemetry: Any) -> dict[str, Any]:
     else:
         payload = {}
     average_recent_request_seconds = getattr(telemetry, "average_recent_request_seconds", None)
-    average_output_tokens_per_second = getattr(telemetry, "average_output_tokens_per_second", None)
+    average_output_tokens_per_second = (
+        average_output_tokens_per_second_override
+        if average_output_tokens_per_second_override is not None
+        else getattr(telemetry, "average_output_tokens_per_second", None)
+    )
     average_context_tokens = getattr(telemetry, "average_context_tokens", None)
     average_concurrent_requests = getattr(telemetry, "average_concurrent_requests", None)
     payload["average_recent_request_seconds"] = average_recent_request_seconds
@@ -1953,25 +2033,46 @@ def _serialize_router_telemetry(telemetry: Any) -> dict[str, Any]:
     return payload
 
 
-def _serialize_router_connection_snapshot(connection: Any) -> dict[str, Any]:
+def _serialize_router_connection_snapshot(
+    connection: Any,
+    *,
+    throughput_by_connection_id: dict[str, float] | None = None,
+) -> dict[str, Any]:
     if hasattr(connection, "model_dump"):
         payload = connection.model_dump(mode="json")
     elif isinstance(connection, dict):
         payload = dict(connection)
     else:
         payload = {}
-    payload["telemetry"] = _serialize_router_telemetry(getattr(connection, "telemetry", payload.get("telemetry")))
+    connection_id = str(getattr(connection, "connection_id", payload.get("connection_id")) or "").strip()
+    throughput_override = None
+    if throughput_by_connection_id:
+        throughput_override = throughput_by_connection_id.get(connection_id)
+    payload["telemetry"] = _serialize_router_telemetry(
+        getattr(connection, "telemetry", payload.get("telemetry")),
+        average_output_tokens_per_second_override=throughput_override,
+    )
     return payload
 
 
-def _serialize_router_panel_payload(panel: dict[str, Any]) -> dict[str, Any]:
+def _serialize_router_panel_payload(
+    panel: dict[str, Any],
+    *,
+    throughput_by_connection_id: dict[str, float] | None = None,
+) -> dict[str, Any]:
     serialized = dict(panel)
     serialized["connections"] = [
-        _serialize_router_connection_snapshot(connection)
+        _serialize_router_connection_snapshot(
+            connection,
+            throughput_by_connection_id=throughput_by_connection_id,
+        )
         for connection in panel.get("connections", [])
     ]
     serialized["worker_connections"] = [
-        _serialize_router_connection_snapshot(connection)
+        _serialize_router_connection_snapshot(
+            connection,
+            throughput_by_connection_id=throughput_by_connection_id,
+        )
         for connection in panel.get("worker_connections", [])
     ]
     serialized["workers"] = [
@@ -1982,7 +2083,10 @@ def _serialize_router_panel_payload(panel: dict[str, Any]) -> dict[str, Any]:
     for endpoint in panel.get("endpoints", []):
         item = dict(endpoint)
         item["models"] = [
-            _serialize_router_connection_snapshot(connection)
+            _serialize_router_connection_snapshot(
+                connection,
+                throughput_by_connection_id=throughput_by_connection_id,
+            )
             for connection in endpoint.get("models", [])
         ]
         serialized_endpoints.append(item)
@@ -2021,7 +2125,7 @@ def _router_panel_payload(
     worker_connections = [
         connection
         for connection in snapshot.connections
-        if connection.source_kind == "worker" and connection.active
+        if connection.source_kind == "worker"
     ]
     return {
         "base_url": router_base_url.rstrip("/"),
@@ -2242,6 +2346,9 @@ def create_router_app(*, layout: ArtifactLayout | None = None) -> FastAPI:
             for item in modal_connections
         ]
         request_payload = router_request_store.payload()
+        throughput_by_connection_id = _request_log_throughput_by_connection(
+            request_payload.get("requests") if isinstance(request_payload, dict) else None,
+        )
         throughput_tps, average_request_seconds, sample_count = _request_log_total_throughput(
             request_payload.get("requests") if isinstance(request_payload, dict) else None,
         )
@@ -2252,6 +2359,10 @@ def create_router_app(*, layout: ArtifactLayout | None = None) -> FastAPI:
         payload["request_log_window_minutes"] = int(ROUTER_THROUGHPUT_WINDOW.total_seconds() // 60)
         payload["modal_model_options"] = _modal_connection_model_options()
         payload["modal_gpu_options"] = _modal_connection_gpu_options()
+        payload = _serialize_router_panel_payload(
+            payload,
+            throughput_by_connection_id=throughput_by_connection_id,
+        )
         if error is None:
             app.state.router_panel_cache = {
                 "captured_at": now,
@@ -2627,6 +2738,7 @@ def create_router_app(*, layout: ArtifactLayout | None = None) -> FastAPI:
                 priority=priority,
                 source_kind="manual",
                 max_concurrent_requests=max_concurrent,
+                max_context_tokens=None,
                 supports_image_inputs=bool(parsed_form.get("connection_supports_images")),
             )
             manual_router_connections[:] = _upsert_router_connection(existing, new_connection)
@@ -3014,6 +3126,7 @@ def create_router_app(*, layout: ArtifactLayout | None = None) -> FastAPI:
                             starred=item.starred,
                             priority=priority if priority is not None else item.priority,
                             max_concurrent_requests=max_concurrent,
+                            max_context_tokens=item.max_context_tokens,
                             supports_image_inputs=(
                                 supports_image_inputs if supports_image_inputs is not None else item.supports_image_inputs
                             ),
@@ -3032,6 +3145,7 @@ def create_router_app(*, layout: ArtifactLayout | None = None) -> FastAPI:
                             starred=item.starred,
                             priority=item.priority,
                             max_concurrent_requests=item.max_concurrent_requests,
+                            max_context_tokens=item.max_context_tokens,
                             supports_image_inputs=item.supports_image_inputs,
                         )
                     )
@@ -3068,6 +3182,7 @@ def create_router_app(*, layout: ArtifactLayout | None = None) -> FastAPI:
                         starred=item.starred,
                         priority=item.priority,
                         max_concurrent_requests=max_concurrent,
+                        max_context_tokens=item.max_context_tokens,
                         supports_image_inputs=supports_image_inputs,
                     )
                 )
@@ -3084,6 +3199,7 @@ def create_router_app(*, layout: ArtifactLayout | None = None) -> FastAPI:
                         starred=item.starred,
                         priority=item.priority,
                         max_concurrent_requests=item.max_concurrent_requests,
+                        max_context_tokens=item.max_context_tokens,
                         supports_image_inputs=item.supports_image_inputs,
                     )
                 )
@@ -3127,6 +3243,7 @@ def create_router_app(*, layout: ArtifactLayout | None = None) -> FastAPI:
                         starred=item.starred,
                         priority=item.priority,
                         max_concurrent_requests=item.max_concurrent_requests,
+                        max_context_tokens=item.max_context_tokens,
                         supports_image_inputs=item.supports_image_inputs,
                     )
                 )
@@ -3143,6 +3260,7 @@ def create_router_app(*, layout: ArtifactLayout | None = None) -> FastAPI:
                         starred=item.starred,
                         priority=item.priority,
                         max_concurrent_requests=item.max_concurrent_requests,
+                        max_context_tokens=item.max_context_tokens,
                         supports_image_inputs=item.supports_image_inputs,
                     )
                 )
@@ -3356,6 +3474,7 @@ def create_router_app(*, layout: ArtifactLayout | None = None) -> FastAPI:
                 starred=item.starred,
                 priority=item.priority,
                 max_concurrent_requests=item.max_concurrent_requests,
+                max_context_tokens=item.max_context_tokens,
                 supports_image_inputs=item.supports_image_inputs,
             )
             for item in manual_snapshot
@@ -3422,6 +3541,40 @@ def create_router_app(*, layout: ArtifactLayout | None = None) -> FastAPI:
             worker = worker_registry.set_router_priority(
                 worker_id,
                 router_priority=requested_priority,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        await _persist_worker_registry()
+        await _sync_router_sources(refresh_health=False)
+        if "application/json" not in content_type:
+            return RedirectResponse(next_url, status_code=303)
+        return JSONResponse({"worker": worker.model_dump(mode="json")})
+
+    @app.post("/router/workers/{worker_id}/max-context")
+    async def set_worker_max_context(request: Request, worker_id: str) -> Response:
+        content_type = request.headers.get("content-type", "")
+        next_url = "/"
+        requested_limit: int | None = None
+        if "application/json" in content_type:
+            payload = WorkerContextSettingsRequest.model_validate(await request.json())
+            requested_limit = payload.max_context_tokens
+        else:
+            body_text = (await request.body()).decode("utf-8")
+            parsed_form = parse_qs(body_text, keep_blank_values=True)
+            next_url = parsed_form.get("next", ["/"])[0] or "/"
+            raw_limit = (parsed_form.get("router_max_context_tokens", [""])[0] or "").strip()
+            if raw_limit:
+                try:
+                    requested_limit = int(raw_limit)
+                except ValueError as exc:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="router_max_context_tokens must be an integer",
+                    ) from exc
+        try:
+            worker = worker_registry.set_router_max_context_tokens(
+                worker_id,
+                router_max_context_tokens=requested_limit,
             )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -3514,6 +3667,22 @@ def create_router_app(*, layout: ArtifactLayout | None = None) -> FastAPI:
             worker = worker_registry.set_router_priority(
                 worker_id,
                 router_priority=payload.priority,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        await _persist_worker_registry()
+        await _sync_router_sources(refresh_health=False)
+        return JSONResponse({"worker": worker.model_dump(mode="json")})
+
+    @app.post("/api/v1/workers/{worker_id}/settings/context")
+    async def set_worker_context_settings(
+        worker_id: str,
+        payload: WorkerContextSettingsRequest,
+    ) -> JSONResponse:
+        try:
+            worker = worker_registry.set_router_max_context_tokens(
+                worker_id,
+                router_max_context_tokens=payload.max_context_tokens,
             )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc

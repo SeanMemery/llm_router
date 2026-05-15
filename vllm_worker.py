@@ -15,6 +15,7 @@ import httpx
 
 
 DEFAULT_VLLM_MAX_CONCURRENCY = 12
+DEFAULT_VLLM_STARTUP_TIMEOUT_SECONDS = 900.0
 
 
 def _sleep_until(deadline_seconds: float, *, terminate_flag: Callable[[], bool]) -> None:
@@ -58,6 +59,20 @@ def _normalize_model_reference(value: str | None) -> str | None:
     if text.startswith("/") or text.startswith("."):
         raise SystemExit(f"Configured model path does not exist: {text}")
     return text
+
+
+def _default_vllm_reasoning_parser(model_reference: str | None) -> str | None:
+    candidate = str(model_reference or "").strip()
+    if candidate.startswith("Qwen/Qwen3") or candidate.startswith("RedHatAI/Qwen3"):
+        return "qwen3"
+    return None
+
+
+def _default_vllm_moe_backend(model_reference: str | None) -> str | None:
+    candidate = str(model_reference or "").strip()
+    if candidate == "RedHatAI/Qwen3.6-35B-A3B-NVFP4":
+        return "marlin"
+    return None
 
 
 def _find_model_target(*, model_path: str | None, model_dir: str | None, model_file: str | None) -> str:
@@ -150,9 +165,24 @@ def _build_vllm_command(model_target: str, *, host: str, port: int) -> list[str]
     gpu_memory = _env("VLLM_GPU_MEMORY_UTILIZATION")
     if gpu_memory:
         command.extend(["--gpu-memory-utilization", gpu_memory])
+    kv_cache_dtype = _env("VLLM_KV_CACHE_DTYPE")
+    if kv_cache_dtype:
+        command.extend(["--kv-cache-dtype", kv_cache_dtype])
     tensor_parallel = _env("VLLM_TENSOR_PARALLEL_SIZE")
     if tensor_parallel:
         command.extend(["--tensor-parallel-size", tensor_parallel])
+    reasoning_parser = _env("VLLM_REASONING_PARSER") or _default_vllm_reasoning_parser(
+        _env("LLAMA_MODEL_NAME") or model_target
+    )
+    if reasoning_parser:
+        command.extend(["--reasoning-parser", reasoning_parser])
+    moe_backend = _env("VLLM_MOE_BACKEND") or _default_vllm_moe_backend(
+        _env("LLAMA_MODEL_NAME") or model_target
+    )
+    if moe_backend:
+        command.extend(["--moe-backend", moe_backend])
+    if _env("VLLM_TRUST_REMOTE_CODE", "0") == "1":
+        command.append("--trust-remote-code")
     extra_args = _env("VLLM_EXTRA_ARGS") or _env("LLAMA_EXTRA_ARGS")
     if extra_args:
         command.extend(shlex.split(extra_args))
@@ -253,7 +283,11 @@ def main() -> int:
     parser.add_argument("--host", default=_env("LLAMA_HOST", "0.0.0.0"))
     parser.add_argument("--port", type=int, default=int(_env("LLAMA_PORT", "8080")))
     parser.add_argument("--heartbeat-seconds", type=float, default=float(_env("LLM_WORKER_HEARTBEAT_SECONDS", "15")))
-    parser.add_argument("--startup-timeout-seconds", type=float, default=float(_env("LLM_WORKER_STARTUP_TIMEOUT_SECONDS", "300")))
+    parser.add_argument(
+        "--startup-timeout-seconds",
+        type=float,
+        default=float(_env("LLM_WORKER_STARTUP_TIMEOUT_SECONDS", str(DEFAULT_VLLM_STARTUP_TIMEOUT_SECONDS))),
+    )
     parser.add_argument("--supports-image-inputs", action="store_true", default=_env("LLAMA_SUPPORTS_IMAGE_INPUTS", "1") == "1")
     parser.add_argument("--max-concurrent", type=int, default=int(_env("LLAMA_MAX_CONCURRENCY", str(DEFAULT_VLLM_MAX_CONCURRENCY))))
     parser.add_argument("--transport-mode", choices=["direct-endpoint", "pull-request"], default=_env("LLM_WORKER_TRANSPORT_MODE", "pull-request"))

@@ -15,6 +15,8 @@
 {% macro render_worker_card(worker, worker_connection, type_label) -%}
 {% set worker_is_disabled = worker_connection.manually_disabled %}
 {% set worker_is_active = worker_connection.active and not worker_is_disabled %}
+{% set worker_status_label = 'Active' if worker_is_active else 'Inactive' %}
+{% set worker_status_class = 'running' if worker_is_active else 'failed' %}
 <article class="router-endpoint router-worker-card">
   <div class="router-endpoint-summary router-worker-summary" data-router-modal-open="router-worker-modal-{{ worker.worker_id }}" tabindex="0" role="button" aria-haspopup="dialog" aria-controls="router-worker-modal-{{ worker.worker_id }}">
     <div class="router-endpoint-main">
@@ -27,17 +29,18 @@
       </div>
       <div class="router-worker-summary-meta">
         <span>{{ compact_tokens(worker_connection.telemetry.total_completion_tokens or 0) }} tks</span>
-        <span>{{ worker_connection.telemetry.request_count or 0 }} reqs</span>
         {% if worker_connection.telemetry.average_output_tokens_per_second is not none %}
         <span>{{ "%.0f"|format(worker_connection.telemetry.average_output_tokens_per_second or 0.0) }} t/s</span>
+        {% else %}
+        <span>-- t/s</span>
         {% endif %}
       </div>
     </div>
     <div class="router-endpoint-summary-right router-worker-summary-right">
       <form method="post" action="/router/workers/{{ worker.worker_id }}/{{ 'disable' if worker_is_active else 'enable' }}" onsubmit="event.stopPropagation();">
         <input type="hidden" name="next" value="/">
-        <button class="pill status-{{ 'running' if worker_is_active else 'failed' }}" type="submit" onclick="event.stopPropagation();">
-          {{ 'Active' if worker_is_active else 'Disabled' }}
+        <button class="pill status-{{ worker_status_class }}" type="submit" onclick="event.stopPropagation();">
+          {{ worker_status_label }}
         </button>
       </form>
       <div class="router-summary-activity" aria-label="Worker activity">
@@ -103,10 +106,29 @@
             >
           </label>
         </form>
+        <form
+          method="post"
+          action="/router/workers/{{ worker.worker_id }}/max-context"
+          class="router-worker-inline-form"
+        >
+          <input type="hidden" name="next" value="/">
+          <label class="router-worker-inline-label">
+            <span>Max ctx</span>
+            <input
+              class="input-parallel auto-submit router-worker-inline-input"
+              type="number"
+              min="1"
+              step="1"
+              name="router_max_context_tokens"
+              value="{{ worker.router_max_context_tokens or '' }}"
+              placeholder="16192"
+            >
+          </label>
+        </form>
         <form method="post" action="/router/workers/{{ worker.worker_id }}/{{ 'disable' if worker_is_active else 'enable' }}">
           <input type="hidden" name="next" value="/">
-          <button class="pill status-{{ 'running' if worker_is_active else 'failed' }}" type="submit">
-            {{ 'Active' if worker_is_active else 'Disabled' }}
+          <button class="pill status-{{ worker_status_class }}" type="submit">
+            {{ worker_status_label }}
           </button>
         </form>
       </div>

@@ -4,6 +4,7 @@ from dashboard.llm_router import (
     GLOBAL_MIN_COMPLETION_TOKENS,
     DashboardLLMRouter,
     LLMRouterConnectionConfig,
+    normalize_canonical_model_name,
 )
 
 
@@ -65,3 +66,9 @@ def test_router_normalization_forces_qwen_sampling_settings() -> None:
     assert payload["presence_penalty"] == 1.5
     assert payload["extra_body"]["top_k"] == 20
     assert payload["extra_body"]["min_p"] == 0.1
+
+
+def test_canonical_model_name_treats_nvfp4_as_base_qwen36_a3b() -> None:
+    assert normalize_canonical_model_name("RedHatAI/Qwen3.6-35B-A3B-NVFP4") == "qwen3.6-35b-a3b"
+    assert normalize_canonical_model_name("Qwen/Qwen3.6-35B-A3B") == "qwen3.6-35b-a3b"
+    assert normalize_canonical_model_name("Qwen/Qwen3.6-35B-A3B-FP8") == "qwen3.6-35b-a3b"

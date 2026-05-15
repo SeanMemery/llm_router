@@ -121,6 +121,7 @@ class LLMWorkerRecord(BaseModel):
     api_key: str | None = None
     max_concurrent_requests: int = Field(ge=1)
     router_max_concurrent_requests: int | None = Field(default=None, ge=1)
+    router_max_context_tokens: int | None = Field(default=16192, ge=1)
     router_priority: int = Field(default=2, ge=1, le=99)
     supports_image_inputs: bool = False
     transport_mode: LLMWorkerTransportMode = LLMWorkerTransportMode.direct_endpoint
@@ -173,6 +174,7 @@ class LLMWorkerRecord(BaseModel):
             starred=False,
             priority=self.router_priority,
             max_concurrent_requests=self.effective_max_concurrent_requests,
+            max_context_tokens=self.router_max_context_tokens,
             supports_image_inputs=self.supports_image_inputs,
             transport_mode=self.transport_mode.value,
         )
@@ -227,6 +229,9 @@ class LLMWorkerRegistry:
             max_concurrent_requests=payload.max_concurrent_requests,
             router_max_concurrent_requests=(
                 existing.router_max_concurrent_requests if existing is not None else None
+            ),
+            router_max_context_tokens=(
+                existing.router_max_context_tokens if existing is not None else 16192
             ),
             router_priority=(existing.router_priority if existing is not None else 2),
             supports_image_inputs=payload.supports_image_inputs,
@@ -300,6 +305,21 @@ class LLMWorkerRegistry:
         if record is None:
             raise KeyError(f"Unknown worker {worker_id}")
         next_record = record.model_copy(update={"router_priority": router_priority})
+        self._workers[worker_id] = next_record
+        return next_record.model_copy(deep=True)
+
+    def set_router_max_context_tokens(
+        self,
+        worker_id: str,
+        *,
+        router_max_context_tokens: int | None,
+    ) -> LLMWorkerRecord:
+        record = self._workers.get(worker_id)
+        if record is None:
+            raise KeyError(f"Unknown worker {worker_id}")
+        next_record = record.model_copy(
+            update={"router_max_context_tokens": router_max_context_tokens}
+        )
         self._workers[worker_id] = next_record
         return next_record.model_copy(deep=True)
 

@@ -11,6 +11,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 GLOBAL_MIN_COMPLETION_TOKENS = 8192
+PER_MODEL_THROUGHPUT_WINDOW_SECONDS = 600.0
 
 
 class LLMRouterError(RuntimeError):
@@ -42,6 +43,7 @@ class LLMRouterConnectionConfig(BaseModel):
     starred: bool = False
     priority: int = Field(default=2, ge=1, le=99)
     max_concurrent_requests: int = Field(ge=1)
+    max_context_tokens: int | None = Field(default=None, ge=1)
     supports_image_inputs: bool = True
 
     @model_validator(mode="after")
@@ -87,19 +89,24 @@ class LLMRouterTelemetry(BaseModel):
 
     @property
     def average_output_tokens_per_second(self) -> float | None:
-        samples = self.recent_request_samples[-25:]
-        if not samples:
-            return None
+        now_epoch_seconds = time.time()
+        cutoff_epoch_seconds = now_epoch_seconds - PER_MODEL_THROUGHPUT_WINDOW_SECONDS
         total_completion_tokens = 0.0
-        total_effective_seconds = 0.0
-        for sample in samples:
+        sample_count = 0
+        for sample in self.recent_request_samples:
+            sample_timestamp = float(sample.get("timestamp_epoch_seconds") or 0.0)
+            if sample_timestamp <= 0.0:
+                continue
+            if sample_timestamp < cutoff_epoch_seconds or sample_timestamp > now_epoch_seconds:
+                continue
             completion_tokens = float(sample.get("completion_tokens") or 0.0)
-            request_seconds = max(float(sample.get("request_seconds") or 0.0), 1e-9)
+            if completion_tokens <= 0.0:
+                continue
             total_completion_tokens += completion_tokens
-            total_effective_seconds += request_seconds
-        if total_effective_seconds <= 0.0:
+            sample_count += 1
+        if sample_count < 1:
             return None
-        return total_completion_tokens / total_effective_seconds
+        return total_completion_tokens / PER_MODEL_THROUGHPUT_WINDOW_SECONDS
 
     @property
     def average_recent_request_seconds(self) -> float | None:
@@ -130,8 +137,14 @@ class LLMRouterTelemetry(BaseModel):
         completion_tokens: int,
         request_duration_seconds: float,
         concurrent_requests_seen: int,
+        timestamp_epoch_seconds: float | None = None,
     ) -> None:
         tokens_per_second = completion_tokens / max(request_duration_seconds, 1e-9)
+        recorded_at = (
+            float(timestamp_epoch_seconds)
+            if timestamp_epoch_seconds is not None
+            else time.time()
+        )
         self.request_count += 1
         self.total_prompt_tokens += prompt_tokens
         self.total_completion_tokens += completion_tokens
@@ -145,6 +158,7 @@ class LLMRouterTelemetry(BaseModel):
                 "request_seconds": request_duration_seconds,
                 "concurrent_requests_seen": concurrent_requests_seen,
                 "tokens_per_second": tokens_per_second,
+                "timestamp_epoch_seconds": recorded_at,
             }
         )
         if len(self.recent_request_samples) > 200:
@@ -216,7 +230,7 @@ def normalize_canonical_model_name(name: str) -> str:
     # remove common quantization suffixes at end (e.g., -q4_k_m, -q8, -int4)
     tokens = [t for t in text.replace("_", "-").split("-") if t]
     filtered: list[str] = []
-    drop_tokens = {"k", "m", "fp16", "bf16", "ud"}
+    drop_tokens = {"k", "m", "fp16", "bf16", "ud", "fp8", "nvfp4"}
     for token in tokens:
         if token.startswith("q") and len(token) >= 2 and token[1].isdigit():
             continue
@@ -305,6 +319,8 @@ class DashboardLLMRouter:
                 canonical_model=canonical,
                 max_context_tokens=prior.max_context_tokens if prior is not None else None,
             )
+            if config.max_context_tokens is not None:
+                runtime.max_context_tokens = int(config.max_context_tokens)
             self._connections.append(runtime)
 
     @staticmethod
@@ -385,27 +401,30 @@ class DashboardLLMRouter:
                     existing_runtime.active = prior.active
                     existing_runtime.last_error = prior.last_error
                     existing_runtime.telemetry = prior.telemetry.model_copy(deep=True)
+                if config.max_context_tokens is not None:
+                    existing_runtime.max_context_tokens = int(config.max_context_tokens)
                 next_connections.append(existing_runtime)
                 continue
             if existing_runtime is not None:
                 clients_to_close.append(existing_runtime.client)
-            next_connections.append(
-                _ConnectionRuntime(
-                    config=config,
-                    client=self._client_factory(config, self._timeout_seconds),
-                    manually_disabled=prior.manually_disabled if prior is not None else False,
-                    active=prior.active if prior is not None else True,
-                    in_flight_requests=0,
-                    last_error=prior.last_error if prior is not None else None,
-                    last_healthy_at=None,
-                    observed_since=self._time_fn(),
-                    telemetry=prior.telemetry.model_copy(deep=True)
-                    if prior is not None
-                    else LLMRouterTelemetry(),
-                    canonical_model=canonical,
-                    max_context_tokens=prior.max_context_tokens if prior is not None else None,
-                )
+            runtime = _ConnectionRuntime(
+                config=config,
+                client=self._client_factory(config, self._timeout_seconds),
+                manually_disabled=prior.manually_disabled if prior is not None else False,
+                active=prior.active if prior is not None else True,
+                in_flight_requests=0,
+                last_error=prior.last_error if prior is not None else None,
+                last_healthy_at=None,
+                observed_since=self._time_fn(),
+                telemetry=prior.telemetry.model_copy(deep=True)
+                if prior is not None
+                else LLMRouterTelemetry(),
+                canonical_model=canonical,
+                max_context_tokens=prior.max_context_tokens if prior is not None else None,
             )
+            if config.max_context_tokens is not None:
+                runtime.max_context_tokens = int(config.max_context_tokens)
+            next_connections.append(runtime)
         clients_to_close.extend(runtime.client for runtime in prior_by_id.values())
         async with self._condition:
             self._connections = next_connections
@@ -681,11 +700,22 @@ class DashboardLLMRouter:
             if not self._models_probe_body_has_models_list(body):
                 raise RuntimeError("Upstream health probe did not return a models list")
             models_context = self._infer_runtime_context_tokens(runtime, body)
-            props_context = await self._probe_runtime_context_tokens_from_props(runtime)
+            props_context = (
+                await self._probe_runtime_context_tokens_from_props(runtime)
+                if models_context is None
+                else None
+            )
             if models_context is not None and props_context is not None:
-                runtime.max_context_tokens = min(models_context, props_context)
+                inferred_context = min(models_context, props_context)
             else:
-                runtime.max_context_tokens = models_context if models_context is not None else props_context
+                inferred_context = models_context if models_context is not None else props_context
+            configured_context = runtime.config.max_context_tokens
+            if configured_context is not None and inferred_context is not None:
+                runtime.max_context_tokens = min(int(configured_context), int(inferred_context))
+            elif configured_context is not None:
+                runtime.max_context_tokens = int(configured_context)
+            else:
+                runtime.max_context_tokens = inferred_context
             runtime.health_probe_failures = 0
             runtime.last_healthy_at = self._time_fn()
             await self.set_connection_active(runtime.config.connection_id, active=True, last_error=None)
@@ -787,7 +817,7 @@ class DashboardLLMRouter:
                     if any(
                         runtime.active
                         and (runtime.config.supports_image_inputs or not requires_image_inputs)
-                        and (requested_model is None or runtime.config.model == requested_model)
+                        and self._runtime_matches_requested_model(runtime, requested_model)
                         and self._runtime_meets_context_requirement(
                             runtime,
                             required_total_tokens=required_total_tokens,
@@ -865,24 +895,18 @@ class DashboardLLMRouter:
             runtime
             for runtime in self._connections
             if runtime.active
+            and not runtime.manually_disabled
             and (runtime.config.supports_image_inputs or not requires_image_inputs)
             and runtime.in_flight_requests < runtime.config.max_concurrent_requests
         ]
         if requested_model is None:
             candidates = base_candidates
         else:
-            exact_candidates = [
-                runtime for runtime in base_candidates if runtime.config.model == requested_model
+            candidates = [
+                runtime
+                for runtime in base_candidates
+                if self._runtime_matches_requested_model(runtime, requested_model)
             ]
-            if exact_candidates:
-                candidates = exact_candidates
-            else:
-                canonical_requested = normalize_canonical_model_name(requested_model)
-                candidates = [
-                    runtime
-                    for runtime in base_candidates
-                    if runtime.canonical_model == canonical_requested
-                ]
         if requested_model is not None:
             return self._filter_runtimes_by_context(
                 candidates,
@@ -914,8 +938,9 @@ class DashboardLLMRouter:
             1
             for runtime in self._connections
             if runtime.active
+            and not runtime.manually_disabled
             and (runtime.config.supports_image_inputs or not requires_image_inputs)
-            and (requested_model is None or runtime.config.model == requested_model)
+            and self._runtime_matches_requested_model(runtime, requested_model)
             and self._runtime_meets_context_requirement(
                 runtime,
                 required_total_tokens=required_total_tokens,
@@ -932,9 +957,10 @@ class DashboardLLMRouter:
     ) -> bool:
         return any(
             runtime.active
+            and not runtime.manually_disabled
             and runtime.config.connection_id not in excluded_connection_ids
             and (runtime.config.supports_image_inputs or not requires_image_inputs)
-            and (requested_model is None or runtime.config.model == requested_model)
+            and self._runtime_matches_requested_model(runtime, requested_model)
             and self._runtime_meets_context_requirement(
                 runtime,
                 required_total_tokens=required_total_tokens,
@@ -992,9 +1018,10 @@ class DashboardLLMRouter:
 
     @classmethod
     def _estimate_required_total_tokens(cls, payload: dict[str, Any]) -> int:
-        completion_budget = cls._extract_completion_budget_tokens(payload)
-        prompt_tokens = cls._estimate_prompt_tokens(payload)
-        return max(1, prompt_tokens + completion_budget)
+        # Route admission should be based on estimated input size. Reserving the
+        # full requested completion budget here makes 16K workers look ineligible
+        # for otherwise valid sub-16K prompts.
+        return max(1, cls._estimate_prompt_tokens(payload))
 
     @staticmethod
     def _runtime_meets_context_requirement(
@@ -1038,8 +1065,9 @@ class DashboardLLMRouter:
             runtime
             for runtime in self._connections
             if runtime.active
+            and not runtime.manually_disabled
             and (runtime.config.supports_image_inputs or not requires_image_inputs)
-            and (requested_model is None or runtime.config.model == requested_model or runtime.canonical_model == normalize_canonical_model_name(requested_model))
+            and self._runtime_matches_requested_model(runtime, requested_model)
         ]
         return bool(
             self._filter_runtimes_by_context(
@@ -1058,13 +1086,26 @@ class DashboardLLMRouter:
             runtime.max_context_tokens
             for runtime in self._connections
             if runtime.active
+            and not runtime.manually_disabled
             and runtime.max_context_tokens is not None
             and (runtime.config.supports_image_inputs or not requires_image_inputs)
-            and (requested_model is None or runtime.config.model == requested_model or runtime.canonical_model == normalize_canonical_model_name(requested_model))
+            and self._runtime_matches_requested_model(runtime, requested_model)
         ]
         if not known_values:
             return None
         return max(int(value) for value in known_values if value is not None)
+
+    @staticmethod
+    def _runtime_matches_requested_model(
+        runtime: _ConnectionRuntime,
+        requested_model: str | None,
+    ) -> bool:
+        if requested_model is None:
+            return True
+        if runtime.config.model == requested_model:
+            return True
+        canonical_requested = normalize_canonical_model_name(requested_model)
+        return bool(canonical_requested) and runtime.canonical_model == canonical_requested
 
     @classmethod
     def _infer_runtime_context_tokens(

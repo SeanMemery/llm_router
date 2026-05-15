@@ -17,6 +17,7 @@ DEFAULT_SERVED_MODEL_NAME = "llm"
 DEFAULT_PYTHON_VERSION = "3.11"
 DEFAULT_VLLM_VERSION = "0.19.1"
 VLLM_PORT = 8000
+DEFAULT_MAX_MODEL_LEN = 16384
 DEFAULT_UV_HTTP_TIMEOUT_SECONDS = "600"
 DEFAULT_UV_HTTP_RETRIES = "8"
 
@@ -101,10 +102,14 @@ def _build_modal_app(
             "--enforce-eager",
             "--max-model-len",
             str(max_model_len),
+            "--kv-cache-dtype",
+            "fp8",
             "--trust-remote-code",
             "--limit-mm-per-prompt",
-            json.dumps({"image": 0, "video": 0, "audio": 0}),
+            json.dumps({"image": 1, "video": 0, "audio": 0}),
         ]
+        if model == DEFAULT_MODEL:
+            cmd.extend(["--reasoning-parser", "qwen3", "--moe-backend", "marlin"])
         if api_key:
             cmd.extend(["--api-key", api_key])
         subprocess.Popen(cmd)
@@ -117,7 +122,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--served-model-name", default=DEFAULT_SERVED_MODEL_NAME)
     parser.add_argument("--gpu", default=DEFAULT_GPU)
-    parser.add_argument("--max-model-len", type=int, default=8192)
+    parser.add_argument("--max-model-len", type=int, default=DEFAULT_MAX_MODEL_LEN)
     parser.add_argument("--duration-minutes", type=int, default=120)
     parser.add_argument("--api-key", default="")
     parser.add_argument("--app-name", default="llm-router-modal-openai")

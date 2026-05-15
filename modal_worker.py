@@ -249,7 +249,7 @@ def _build_modal_runtime(
                 "attention_backend": "flashinfer",
                 "async_scheduling": True,
             }
-            if str(self.configured_model_name).startswith("RedHatAI/"):
+            if str(self.configured_model_name).strip() == "RedHatAI/Qwen3.6-35B-A3B-NVFP4":
                 llm_kwargs["moe_backend"] = "marlin"
             self._llm = vllm.LLM(**llm_kwargs)
             self._sampling_params = self._llm.get_default_sampling_params()

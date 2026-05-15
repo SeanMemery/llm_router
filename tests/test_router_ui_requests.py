@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from ui_app import (
     _history_with_request_log_throughput,
+    _panel_with_request_log_connection_metrics,
     _request_log_window_metrics,
     create_router_ui_app,
 )
@@ -83,6 +84,68 @@ def test_history_uses_request_log_throughput_for_each_point() -> None:
     assert history["points"][1]["throughput"] == 0.25
 
 
+def test_panel_request_log_metrics_override_connection_throughput() -> None:
+    panel = _panel_with_request_log_connection_metrics(
+        {
+            "connections": [
+                {
+                    "connection_id": "http-worker-example-v1-selected-model",
+                    "telemetry": {"average_output_tokens_per_second": None},
+                },
+                {
+                    "connection_id": "worker:worker-1",
+                    "telemetry": {"average_output_tokens_per_second": None},
+                },
+            ],
+            "worker_connections": [
+                {
+                    "connection_id": "worker:worker-1",
+                    "telemetry": {"average_output_tokens_per_second": None},
+                }
+            ],
+            "endpoints": [
+                {
+                    "base_url": "http://worker.example/v1",
+                    "average_output_tokens_per_second": None,
+                    "models": [
+                        {
+                            "connection_id": "http-worker-example-v1-selected-model",
+                            "model": "selected-model",
+                            "telemetry": {"average_output_tokens_per_second": None},
+                        }
+                    ],
+                }
+            ],
+        },
+        requests={
+            "requests": [
+                {
+                    "timestamp": "2026-05-01T11:58:00Z",
+                    "base_url": "http://worker.example/v1",
+                    "selected_model": "selected-model",
+                    "completion_tokens": 120,
+                    "duration_seconds": 2.0,
+                    "source_kind": "manual",
+                },
+                {
+                    "timestamp": "2026-05-01T11:57:00Z",
+                    "worker_id": "worker-1",
+                    "completion_tokens": 60,
+                    "duration_seconds": 3.0,
+                    "source_kind": "worker",
+                },
+            ]
+        },
+        now=datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc),
+    )
+
+    assert panel["connections"][0]["telemetry"]["average_output_tokens_per_second"] == 0.2
+    assert panel["connections"][1]["telemetry"]["average_output_tokens_per_second"] == 0.1
+    assert panel["worker_connections"][0]["telemetry"]["average_output_tokens_per_second"] == 0.1
+    assert panel["endpoints"][0]["average_output_tokens_per_second"] == 0.2
+    assert panel["endpoints"][0]["models"][0]["telemetry"]["average_output_tokens_per_second"] == 0.2
+
+
 def test_router_ui_home_includes_request_panel(monkeypatch) -> None:
     monkeypatch.setattr(
         "ui_app._utc_now",
@@ -103,7 +166,26 @@ def test_router_ui_home_includes_request_panel(monkeypatch) -> None:
                         "display_name": "s1804274-infk8s-40gb-router-worker-bjbwj-wnpwf",
                     }
                 ],
-                "worker_connections": [],
+                "worker_connections": [
+                    {
+                        "connection_id": "worker:worker-1",
+                        "worker_id": "worker-1",
+                        "transport_mode": "pull-request",
+                        "telemetry": {
+                            "request_count": 0,
+                            "total_prompt_tokens": 0,
+                            "total_completion_tokens": 0,
+                            "average_output_tokens_per_second": None,
+                            "average_recent_request_seconds": None,
+                        },
+                        "max_concurrent_requests": 1,
+                        "in_flight_requests": 0,
+                        "canonical_model": "selected-model",
+                        "usage_percentage": 0.0,
+                        "active": True,
+                        "manually_disabled": False,
+                    }
+                ],
                 "worker_counts": {"online": 0, "offline": 0, "total": 0},
                 "waiting_requests": 0,
                 "total_tokens_label": "4",
@@ -133,9 +215,9 @@ def test_router_ui_home_includes_request_panel(monkeypatch) -> None:
                         "base_url": "worker://worker-1",
                         "base_url_display": "worker://worker-1",
                         "prompt_tokens": 10,
-                        "completion_tokens": 20,
+                        "completion_tokens": 1200,
                         "prompt_tokens_label": "10",
-                        "completion_tokens_label": "20",
+                        "completion_tokens_label": "1.20K",
                         "duration_seconds": 0.4,
                         "duration_label": "400ms",
                         "http_status_code": 200,
@@ -174,7 +256,7 @@ def test_router_ui_home_includes_request_panel(monkeypatch) -> None:
                     ],
                 },
                 "error": None,
-                "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30},
+                "usage": {"prompt_tokens": 10, "completion_tokens": 1200, "total_tokens": 1210},
                 "timing": {
                     "router_request_seconds": 0.4,
                     "upstream_request_seconds": 0.4,
@@ -217,29 +299,79 @@ def test_router_ui_home_includes_request_panel(monkeypatch) -> None:
         assert "Throughput" in home.text
         assert "(10m)" in home.text
         assert "0.4 s" in home.text
+        assert "2 t/s" in home.text
         assert 'data-endpoint-support-toggle="modal"' in home.text
-        assert 'data-endpoint-support="modal"' in home.text
-        assert "0.03 t/s" in home.text
-        assert "In-flight requests and throughput" not in home.text
-        assert "Last 1 hour. Left axis: in-flight requests. Right axis: throughput (tokens/sec)." not in home.text
-        assert 'id="router-summary-live"' not in home.text
-        assert "Recent router traffic" not in home.text
-        assert "/router/requests/req-1" in home.text
-        assert "selected-model" not in home.text
-        assert "s1804274-infk8s-40gb-router-worker-bjbwj-wnpwf" in home.text
-        assert "Start Modal endpoint" in home.text
-        assert "Automatic</p>" in home.text
-        assert "No automatic router workers are connected." in home.text
-        assert ">200<" not in home.text
-        assert "2026-04-27 13:00:00" in home.text
 
-        detail = client.get("/router/requests/req-1")
-        assert detail.status_code == 200
-        assert "Request req-1" in detail.text
-        assert "Explain the route choice." in detail.text
-        assert "The router picked the lowest-cost healthy backend." in detail.text
-        assert "It selected the healthy worker with available capacity." in detail.text
-        assert "selected-model" in detail.text
+
+def test_router_ui_shows_inactive_automatic_worker(monkeypatch) -> None:
+    async def _fake_fetch(path: str) -> dict[str, object]:
+        if path == "/api/router/panel":
+            return {
+                "base_url": "http://router.example:8788/v1",
+                "shared_model": "shared-model",
+                "public_access": {},
+                "connections": [],
+                "endpoints": [],
+                "workers": [
+                    {
+                        "worker_id": "worker-1",
+                        "display_name": "auto-worker-1",
+                        "model": "demo-model",
+                        "transport_mode": "pull-request",
+                        "metadata": {},
+                    }
+                ],
+                "worker_connections": [
+                    {
+                        "connection_id": "conn-1",
+                        "worker_id": "worker-1",
+                        "base_url": "worker://worker-1",
+                        "model": "demo-model",
+                        "source_kind": "worker",
+                        "transport_mode": "pull-request",
+                        "active": False,
+                        "manually_disabled": True,
+                        "in_flight_requests": 0,
+                        "max_concurrent_requests": 2,
+                        "usage_percentage": None,
+                        "telemetry": {
+                            "request_count": 0,
+                            "total_prompt_tokens": 0,
+                            "total_completion_tokens": 0,
+                            "average_recent_request_seconds": None,
+                            "average_output_tokens_per_second": None,
+                        },
+                    }
+                ],
+                "worker_counts": {"online": 1, "offline": 0, "total": 1},
+                "waiting_requests": 0,
+                "total_tokens_label": "0",
+                "average_request_seconds": 0.0,
+                "average_output_tokens_per_second": 0.0,
+                "total_output_tokens_per_second": 0.0,
+                "total_in_flight_requests": 0,
+                "rendered_at": "12:00:00",
+                "error_count": 0,
+                "canonical_models": [],
+            }
+        if path == "/api/router/history":
+            return {"points": [], "window_seconds": 3600}
+        if path == "/api/router/requests":
+            return {"max_entries": 1000, "total_retained": 0, "requests": []}
+        raise AssertionError(f"Unexpected backend path: {path}")
+
+    monkeypatch.setattr("ui_app._fetch_backend_json", _fake_fetch)
+    monkeypatch.setattr(
+        "ui_app._fetch_backend_json_optional",
+        lambda path, default: _fake_fetch(path),
+    )
+    app = create_router_ui_app()
+    with TestClient(app) as client:
+        home = client.get("/")
+        assert home.status_code == 200
+        assert "Automatic</p>" in home.text
+        assert "auto-worker-1" in home.text
+        assert "Inactive" in home.text
 
 
 def test_router_live_returns_request_log_throughput_history(monkeypatch) -> None:

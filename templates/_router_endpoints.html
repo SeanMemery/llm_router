@@ -27,7 +27,13 @@
       </div>
       <div class="router-worker-summary-meta">
         <span>{{ endpoint.completion_tokens_label }} tks</span>
-        <span>{{ endpoint.request_count }} reqs</span>
+        <span>
+          {% if endpoint.average_output_tokens_per_second is not none %}
+          {{ "%.0f"|format(endpoint.average_output_tokens_per_second or 0.0) }} t/s
+          {% else %}
+          -- t/s
+          {% endif %}
+        </span>
         <span>{{ endpoint.model_count }} models</span>
       </div>
     </div>
